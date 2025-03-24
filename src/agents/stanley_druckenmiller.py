@@ -46,11 +46,6 @@ def stanley_druckenmiller_agent(state: AgentState):
         metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5)
 
         progress.update_status("stanley_druckenmiller_agent", ticker, "Gathering financial line items")
-        # Include relevant line items for Stan Druckenmiller's approach:
-        #   - Growth & momentum: revenue, EPS, operating_income, ...
-        #   - Valuation: net_income, free_cash_flow, ebit, ebitda
-        #   - Leverage: total_debt, shareholders_equity
-        #   - Liquidity: cash_and_equivalents
         financial_line_items = search_line_items(
             ticker,
             [
@@ -79,9 +74,13 @@ def stanley_druckenmiller_agent(state: AgentState):
 
         progress.update_status("stanley_druckenmiller_agent", ticker, "Fetching insider trades")
         insider_trades = get_insider_trades(ticker, end_date, start_date=None, limit=50)
+        if not insider_trades:
+            progress.update_status("stanley_druckenmiller_agent", ticker, "No insider trades available")
 
         progress.update_status("stanley_druckenmiller_agent", ticker, "Fetching company news")
         company_news = get_company_news(ticker, end_date, start_date=None, limit=50)
+        if not company_news:
+            progress.update_status("stanley_druckenmiller_agent", ticker, "No company news available")
 
         progress.update_status("stanley_druckenmiller_agent", ticker, "Fetching recent price data for momentum")
         prices = get_prices(ticker, start_date=start_date, end_date=end_date)
@@ -172,10 +171,8 @@ def analyze_growth_and_momentum(financial_line_items: list, prices: list) -> dic
     details = []
     raw_score = 0  # We'll sum up a maximum of 9 raw points, then scale to 0–10
 
-    #
     # 1. Revenue Growth
-    #
-    revenues = [fi.revenue for fi in financial_line_items if fi.revenue is not None]
+    revenues = [fi.revenue for fi in financial_line_items if hasattr(fi, "revenue") and fi.revenue is not None]
     if len(revenues) >= 2:
         latest_rev = revenues[0]
         older_rev = revenues[-1]
@@ -197,14 +194,11 @@ def analyze_growth_and_momentum(financial_line_items: list, prices: list) -> dic
     else:
         details.append("Not enough revenue data points for growth calculation.")
 
-    #
     # 2. EPS Growth
-    #
-    eps_values = [fi.earnings_per_share for fi in financial_line_items if fi.earnings_per_share is not None]
+    eps_values = [fi.earnings_per_share for fi in financial_line_items if hasattr(fi, "earnings_per_share") and fi.earnings_per_share is not None]
     if len(eps_values) >= 2:
         latest_eps = eps_values[0]
         older_eps = eps_values[-1]
-        # Avoid division by zero
         if abs(older_eps) > 1e-9:
             eps_growth = (latest_eps - older_eps) / abs(older_eps)
             if eps_growth > 0.30:
@@ -223,10 +217,7 @@ def analyze_growth_and_momentum(financial_line_items: list, prices: list) -> dic
     else:
         details.append("Not enough EPS data points for growth calculation.")
 
-    #
     # 3. Price Momentum
-    #
-    # We'll give up to 3 points for strong momentum
     if prices and len(prices) > 30:
         sorted_prices = sorted(prices, key=lambda p: p.time)
         close_prices = [p.close for p in sorted_prices if p.close is not None]
@@ -253,12 +244,7 @@ def analyze_growth_and_momentum(financial_line_items: list, prices: list) -> dic
     else:
         details.append("Not enough recent price data for momentum analysis.")
 
-    # We assigned up to 3 points each for:
-    #   revenue growth, eps growth, momentum
-    # => max raw_score = 9
-    # Scale to 0–10
     final_score = min(10, (raw_score / 9) * 10)
-
     return {"score": final_score, "details": "; ".join(details)}
 
 
@@ -269,18 +255,15 @@ def analyze_insider_activity(insider_trades: list) -> dict:
       - If there's mostly selling, we reduce it.
       - Otherwise, neutral.
     """
-    # Default is neutral (5/10).
-    score = 5
+    score = 5  # Default neutral
     details = []
 
     if not insider_trades:
-        details.append("No insider trades data; defaulting to neutral")
+        details.append("No insider trades data available; defaulting to neutral")
         return {"score": score, "details": "; ".join(details)}
 
     buys, sells = 0, 0
     for trade in insider_trades:
-        # Use transaction_shares to determine if it's a buy or sell
-        # Negative shares = sell, positive shares = buy
         if trade.transaction_shares is not None:
             if trade.transaction_shares > 0:
                 buys += 1
@@ -294,15 +277,12 @@ def analyze_insider_activity(insider_trades: list) -> dict:
 
     buy_ratio = buys / total
     if buy_ratio > 0.7:
-        # Heavy buying => +3 points from the neutral 5 => 8
         score = 8
         details.append(f"Heavy insider buying: {buys} buys vs. {sells} sells")
     elif buy_ratio > 0.4:
-        # Moderate buying => +1 => 6
         score = 6
         details.append(f"Moderate insider buying: {buys} buys vs. {sells} sells")
     else:
-        # Low insider buying => -1 => 4
         score = 4
         details.append(f"Mostly insider selling: {buys} buys vs. {sells} sells")
 
@@ -314,7 +294,7 @@ def analyze_sentiment(news_items: list) -> dict:
     Basic news sentiment: negative keyword check vs. overall volume.
     """
     if not news_items:
-        return {"score": 5, "details": "No news data; defaulting to neutral sentiment"}
+        return {"score": 5, "details": "No news data available; defaulting to neutral sentiment"}
 
     negative_keywords = ["lawsuit", "fraud", "negative", "downturn", "decline", "investigation", "recall"]
     negative_count = 0
@@ -325,15 +305,12 @@ def analyze_sentiment(news_items: list) -> dict:
 
     details = []
     if negative_count > len(news_items) * 0.3:
-        # More than 30% negative => somewhat bearish => 3/10
         score = 3
         details.append(f"High proportion of negative headlines: {negative_count}/{len(news_items)}")
     elif negative_count > 0:
-        # Some negativity => 6/10
         score = 6
         details.append(f"Some negative headlines: {negative_count}/{len(news_items)}")
     else:
-        # Mostly positive => 8/10
         score = 8
         details.append("Mostly positive/neutral headlines")
 
@@ -351,14 +328,11 @@ def analyze_risk_reward(financial_line_items: list, market_cap: float | None, pr
         return {"score": 0, "details": "Insufficient data for risk-reward analysis"}
 
     details = []
-    raw_score = 0  # We'll accumulate up to 6 raw points, then scale to 0-10
+    raw_score = 0
 
-    #
     # 1. Debt-to-Equity
-    #
-    debt_values = [fi.total_debt for fi in financial_line_items if fi.total_debt is not None]
-    equity_values = [fi.shareholders_equity for fi in financial_line_items if fi.shareholders_equity is not None]
-
+    debt_values = [fi.total_debt for fi in financial_line_items if hasattr(fi, "total_debt") and fi.total_debt is not None]
+    equity_values = [fi.shareholders_equity for fi in financial_line_items if hasattr(fi, "shareholders_equity") and fi.shareholders_equity is not None]
     if debt_values and equity_values and len(debt_values) == len(equity_values) and len(debt_values) > 0:
         recent_debt = debt_values[0]
         recent_equity = equity_values[0] if equity_values[0] else 1e-9
@@ -377,9 +351,7 @@ def analyze_risk_reward(financial_line_items: list, market_cap: float | None, pr
     else:
         details.append("No consistent debt/equity data available.")
 
-    #
     # 2. Price Volatility
-    #
     if len(prices) > 10:
         sorted_prices = sorted(prices, key=lambda p: p.time)
         close_prices = [p.close for p in sorted_prices if p.close is not None]
@@ -390,7 +362,7 @@ def analyze_risk_reward(financial_line_items: list, market_cap: float | None, pr
                 if prev_close > 0:
                     daily_returns.append((close_prices[i] - prev_close) / prev_close)
             if daily_returns:
-                stdev = statistics.pstdev(daily_returns)  # population stdev
+                stdev = statistics.pstdev(daily_returns)
                 if stdev < 0.01:
                     raw_score += 3
                     details.append(f"Low volatility: daily returns stdev {stdev:.2%}")
@@ -409,7 +381,6 @@ def analyze_risk_reward(financial_line_items: list, market_cap: float | None, pr
     else:
         details.append("Not enough price data for volatility analysis.")
 
-    # raw_score out of 6 => scale to 0–10
     final_score = min(10, (raw_score / 6) * 10)
     return {"score": final_score, "details": "; ".join(details)}
 
@@ -430,17 +401,15 @@ def analyze_druckenmiller_valuation(financial_line_items: list, market_cap: floa
     raw_score = 0
 
     # Gather needed data
-    net_incomes = [fi.net_income for fi in financial_line_items if fi.net_income is not None]
-    fcf_values = [fi.free_cash_flow for fi in financial_line_items if fi.free_cash_flow is not None]
-    ebit_values = [fi.ebit for fi in financial_line_items if fi.ebit is not None]
-    ebitda_values = [fi.ebitda for fi in financial_line_items if fi.ebitda is not None]
+    net_incomes = [fi.net_income for fi in financial_line_items if hasattr(fi, "net_income") and fi.net_income is not None]
+    fcf_values = [fi.free_cash_flow for fi in financial_line_items if hasattr(fi, "free_cash_flow") and fi.free_cash_flow is not None]
+    ebit_values = [fi.ebit for fi in financial_line_items if hasattr(fi, "ebit") and fi.ebit is not None]
+    ebitda_values = [fi.ebitda for fi in financial_line_items if hasattr(fi, "ebitda") and fi.ebitda is not None]
+    debt_values = [fi.total_debt for fi in financial_line_items if hasattr(fi, "total_debt") and fi.total_debt is not None]
+    cash_values = [fi.cash_and_equivalents for fi in financial_line_items if hasattr(fi, "cash_and_equivalents") and fi.cash_and_equivalents is not None]
 
-    # For EV calculation, let's get the most recent total_debt & cash
-    debt_values = [fi.total_debt for fi in financial_line_items if fi.total_debt is not None]
-    cash_values = [fi.cash_and_equivalents for fi in financial_line_items if fi.cash_and_equivalents is not None]
     recent_debt = debt_values[0] if debt_values else 0
     recent_cash = cash_values[0] if cash_values else 0
-
     enterprise_value = market_cap + recent_debt - recent_cash
 
     # 1) P/E
@@ -511,10 +480,7 @@ def analyze_druckenmiller_valuation(financial_line_items: list, market_cap: floa
     else:
         details.append("No valid EV/EBITDA because EV <= 0 or EBITDA <= 0")
 
-    # We have up to 2 points for each of the 4 metrics => 8 raw points max
-    # Scale raw_score to 0–10
     final_score = min(10, (raw_score / 8) * 10)
-
     return {"score": final_score, "details": "; ".join(details)}
 
 
@@ -532,14 +498,14 @@ def generate_druckenmiller_output(
             (
                 "system",
                 """You are a Stanley Druckenmiller AI agent, making investment decisions using his principles:
-            
+
             1. Seek asymmetric risk-reward opportunities (large upside, limited downside).
             2. Emphasize growth, momentum, and market sentiment.
             3. Preserve capital by avoiding major drawdowns.
             4. Willing to pay higher valuations for true growth leaders.
             5. Be aggressive when conviction is high.
             6. Cut losses quickly if the thesis changes.
-            
+
             Rules:
             - Reward companies showing strong revenue/earnings growth and positive stock momentum.
             - Evaluate sentiment and insider activity as supportive or contradictory signals.
