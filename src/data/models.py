@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class Price(BaseModel):
@@ -17,9 +17,9 @@ class PriceResponse(BaseModel):
 
 class FinancialMetrics(BaseModel):
     ticker: str
-    report_period: str
-    period: str
-    currency: str
+    report_period: str  # e.g., "2024-09-30"
+    period: str  # "annual" or "quarterly"
+    currency: str  # e.g., "USD"
     market_cap: float | None = None
     enterprise_value: float | None = None
     price_to_earnings_ratio: float | None = None
@@ -59,6 +59,9 @@ class FinancialMetrics(BaseModel):
     earnings_per_share: float | None = None
     book_value_per_share: float | None = None
     free_cash_flow_per_share: float | None = None
+    net_income: float | None = None  # Added for consistency with api.py
+    revenue: float | None = None  # Added for consistency with api.py
+    operating_income: float | None = None  # Added for consistency with api.py
 
 
 class FinancialMetricsResponse(BaseModel):
@@ -67,12 +70,25 @@ class FinancialMetricsResponse(BaseModel):
 
 class LineItem(BaseModel):
     ticker: str
-    report_period: str
-    period: str
-    currency: str
+    report_period: str  # e.g., "2024-09-30"
+    period: str  # "annual" or "quarterly"
+    currency: str  # e.g., "USD"
+    revenue: float | None = None
+    earnings_per_share: float | None = None
+    net_income: float | None = None
+    operating_income: float | None = None
+    gross_margin: float | None = None
+    operating_margin: float | None = None
+    free_cash_flow: float | None = None
+    capital_expenditure: float | None = None
+    cash_and_equivalents: float | None = None
+    total_debt: float | None = None
+    shareholders_equity: float | None = None
+    outstanding_shares: float | None = None
+    ebit: float | None = None
+    ebitda: float | None = None
 
-    # Allow additional fields dynamically
-    model_config = {"extra": "allow"}
+    model_config = ConfigDict(extra="allow")  # Allow extra fields for flexibility
 
 
 class LineItemResponse(BaseModel):
@@ -81,17 +97,17 @@ class LineItemResponse(BaseModel):
 
 class InsiderTrade(BaseModel):
     ticker: str
-    issuer: str | None
-    name: str | None
-    title: str | None
-    is_board_director: bool | None
-    transaction_date: str | None
-    transaction_shares: float | None
-    transaction_price_per_share: float | None
-    transaction_value: float | None
-    shares_owned_before_transaction: float | None
-    shares_owned_after_transaction: float | None
-    security_title: str | None
+    issuer: str | None = None
+    name: str | None = None
+    title: str | None = None
+    is_board_director: bool | None = None
+    transaction_date: str | None = None
+    transaction_shares: float | None = None
+    transaction_price_per_share: float | None = None
+    transaction_value: float | None = None
+    shares_owned_before_transaction: float | None = None
+    shares_owned_after_transaction: float | None = None
+    security_title: str | None = None
     filing_date: str
 
 
@@ -99,18 +115,19 @@ class InsiderTradeResponse(BaseModel):
     insider_trades: list[InsiderTrade]
 
 
-class CompanyNews(BaseModel):
-    ticker: str
-    title: str
-    author: str
-    source: str
-    date: str
-    url: str
+class NewsItem(BaseModel):  # Renamed from CompanyNews to match api.py
+    ticker: str | None = None  # Added for consistency
+    title: str | None = None
+    summary: str | None = None  # Replaced author/source/url with summary
+    date: str | None = None
+    author: str | None = None  # Optional fields from your version
+    source: str | None = None
+    url: str | None = None
     sentiment: str | None = None
 
 
-class CompanyNewsResponse(BaseModel):
-    news: list[CompanyNews]
+class NewsItemResponse(BaseModel):  # Added to match pattern
+    news: list[NewsItem]
 
 
 class Position(BaseModel):
@@ -146,4 +163,4 @@ class AgentStateData(BaseModel):
 
 class AgentStateMetadata(BaseModel):
     show_reasoning: bool = False
-    model_config = {"extra": "allow"}
+    model_config = ConfigDict(extra="allow")  # Updated syntax
