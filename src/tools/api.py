@@ -5,15 +5,12 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data import NewsClient, NewsRequest
-from yfinance import Ticker
+from yfinance import Ticker  # Only for sharesOutstanding
 from data.cache import get_cache
 from data.models import (
     Price,
-    PriceResponse,
     FinancialMetrics,
-    FinancialMetricsResponse,
     LineItem,
-    LineItemResponse,
     NewsItem,
 )
 
@@ -30,11 +27,11 @@ alpaca_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 news_client = NewsClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
 def get_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
-    """Fetch historical price data from Alpaca."""
-    # Adjust start_date to ensure enough data (e.g., 30 days for momentum)
     adjusted_start_date = (pd.Timestamp(end_date) - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+    print(f"get_prices: Requesting {ticker} from {adjusted_start_date} to {end_date}")
     if cached_data := _cache.get_prices(ticker):
         filtered_data = [Price(**price) for price in cached_data if adjusted_start_date <= price["time"] <= end_date]
+        print(f"get_prices: Cached {len(filtered_data)} prices for {ticker}")
         if filtered_data:
             return filtered_data
 
@@ -60,61 +57,61 @@ def get_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
             time=pd.Timestamp(row["timestamp"]).strftime("%Y-%m-%d")
         ) for _, row in bars.iterrows()
     ]
-    # Add latest price if end_date is today
     if end_date == pd.Timestamp.now().strftime("%Y-%m-%d"):
         latest = get_latest_price(ticker)
         prices.append(Price(
-            open=latest, close=latest, high=latest, low=latest,  # Simplified
-            volume=0,  # Volume unavailable in latest quote
+            open=latest, close=latest, high=latest, low=latest,
+            volume=0,
             time=end_date
         ))
     _cache.set_prices(ticker, [p.model_dump() for p in prices])
     return prices
 
 def get_latest_price(ticker: str) -> float:
-    """Fetch the latest real-time price (midpoint of bid/ask)."""
     request = StockLatestQuoteRequest(symbol_or_symbols=ticker)
     quote = alpaca_client.get_stock_latest_quote(request)
     if ticker in quote and quote[ticker].bid_price and quote[ticker].ask_price:
         return (quote[ticker].bid_price + quote[ticker].ask_price) / 2
-    return 100.0  # Fallback for simulation
+    return 100.0  # Fallback
 
 def get_market_cap(ticker: str, end_date: str | None = None) -> float:
-    yf_ticker = Ticker(ticker)
     if not end_date:
-        return float(yf_ticker.info.get("marketCap", 0.0))
-    prices = yf_ticker.history(start=end_date, end=end_date)
-    if prices.empty:
+        latest_price = get_latest_price(ticker)
+        shares = Ticker(ticker).info.get("sharesOutstanding", 0)
+        return float(latest_price * shares if shares else 0.0)
+
+    prices = get_prices(ticker, start_date=end_date, end_date=end_date)
+    if not prices:
+        print(f"No price data for {ticker} on {end_date} to calculate market cap")
         return 0.0
-    shares = yf_ticker.info.get("sharesOutstanding", 0)
-    return float(prices["Close"].iloc[0] * shares if shares else 0.0)
+    latest_close = prices[-1].close
+    shares = Ticker(ticker).info.get("sharesOutstanding", 0)
+    return float(latest_close * shares if shares else 0.0)
 
 def get_financial_metrics(ticker: str, end_date: str, period: str = "annual", limit: int = 5) -> list[FinancialMetrics]:
-    """Fetch financial metrics from yfinance with improved mapping."""
     yf_ticker = Ticker(ticker)
     financials = yf_ticker.financials if period == "annual" else yf_ticker.quarterly_financials
     if financials.empty:
         return []
 
     metrics = []
-    currency = yf_ticker.info.get("currency", "USD")  # Default to USD if unavailable
+    currency = yf_ticker.info.get("currency", "USD")
     for date in financials.columns[:limit]:
         row = financials[date]
         metrics.append(FinancialMetrics(
             ticker=ticker,
-            report_period=date.strftime("%Y-%m-%d"),  # Use date as report_period
-            period=period,  # "annual" or "quarterly" from function arg
+            report_period=date.strftime("%Y-%m-%d"),
+            period=period,
             currency=currency,
             net_income=row.get("Net Income", None),
             revenue=row.get("Total Revenue", None),
             operating_income=row.get("Operating Income", None),
             earnings_per_share=row.get("Diluted EPS", None),
-            market_cap=get_market_cap(ticker),  # Add market cap for completeness
+            market_cap=get_market_cap(ticker, end_date),  # Use end_date
         ))
     return metrics
 
 def search_line_items(ticker: str, line_items: list[str], end_date: str, period: str = "annual", limit: int = 5) -> list[LineItem]:
-    """Fetch financial line items from yfinance with broader mapping."""
     yf_ticker = Ticker(ticker)
     financials = yf_ticker.financials if period == "annual" else yf_ticker.quarterly_financials
     balance_sheet = yf_ticker.balance_sheet if period == "annual" else yf_ticker.quarterly_balance_sheet
@@ -124,15 +121,15 @@ def search_line_items(ticker: str, line_items: list[str], end_date: str, period:
         return []
 
     items = []
-    currency = yf_ticker.info.get("currency", "USD")  # Default to USD if unavailable
+    currency = yf_ticker.info.get("currency", "USD")
     for date in financials.columns[:limit]:
         fin_row = financials[date]
         bal_row = balance_sheet.get(date, pd.Series())
         cash_row = cashflow.get(date, pd.Series())
         item = LineItem(
             ticker=ticker,
-            report_period=date.strftime("%Y-%m-%d"),  # Use date as report_period
-            period=period,  # "annual" or "quarterly" from function arg
+            report_period=date.strftime("%Y-%m-%d"),
+            period=period,
             currency=currency
         )
         for li in line_items:
@@ -157,7 +154,6 @@ def get_insider_trades(ticker: str, end_date: str, start_date: str | None = None
     return []  # Still unimplemented
 
 def get_company_news(ticker: str, end_date: str, start_date: str | None = None, limit: int = 50) -> list[NewsItem]:
-    """Fetch news from Alpaca News API."""
     if not start_date:
         start_date = (pd.Timestamp(end_date) - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
     request = NewsRequest(
@@ -176,7 +172,7 @@ def get_company_news(ticker: str, end_date: str, start_date: str | None = None, 
         author=n.author,
         source=n.source,
         url=n.url,
-        sentiment=None  # Add sentiment analysis if desired
+        sentiment=None
     ) for n in news]
 
 def prices_to_df(prices: list[Price]) -> pd.DataFrame:
