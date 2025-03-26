@@ -28,10 +28,8 @@ news_client = NewsClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
 def get_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
     adjusted_start_date = (pd.Timestamp(end_date) - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
-    print(f"get_prices: Requesting {ticker} from {adjusted_start_date} to {end_date}")
     if cached_data := _cache.get_prices(ticker):
         filtered_data = [Price(**price) for price in cached_data if adjusted_start_date <= price["time"] <= end_date]
-        print(f"get_prices: Cached {len(filtered_data)} prices for {ticker}")
         if filtered_data:
             return filtered_data
 

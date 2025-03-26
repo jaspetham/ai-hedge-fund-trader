@@ -28,9 +28,10 @@ from tabulate import tabulate
 from utils.visualize import save_graph_as_png
 import json
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus
 import os
+import requests
 from tools.api import get_prices, get_latest_price
 
 load_dotenv()
@@ -47,61 +48,83 @@ def parse_hedge_fund_response(response):
         print(f"Error parsing response: {e}\nResponse: {repr(response)}")
         return None
 
+def cancel_single_order(order_id, api_key, secret_key, paper=True):
+    base_url = "https://paper-api.alpaca.markets" if paper else "https://api.alpaca.markets"
+    url = f"{base_url}/v2/orders/{order_id}"
+    headers = {
+        "APCA-API-KEY-ID": api_key,
+        "APCA-API-SECRET-KEY": secret_key
+    }
+    response = requests.delete(url, headers=headers)
+    if response.status_code == 204:
+        print(f"Order {order_id} canceled successfully")
+    else:
+        print(f"Failed to cancel order {order_id}: {response.text}")
+
 def place_alpaca_order(ticker: str, qty: float, action: str, tp: float, sl: float, portfolio: dict):
     current_price = get_latest_price(ticker)
     order_cost = qty * current_price
     position = portfolio["positions"].get(ticker, {"long": 0, "short": 0, "long_cost_basis": 0.0, "short_cost_basis": 0.0, "long_tp": 0.0, "long_sl": 0.0, "short_tp": 0.0, "short_sl": 0.0})
     cash = portfolio["cash"]
 
+    # Check and cancel existing orders to avoid wash trade conflicts
+    request = GetOrdersRequest(status='open', symbol=ticker)
+    open_orders = alpaca_client.get_orders(request)
+    for order in open_orders:
+        print(f"Canceling existing order {order.id} for {ticker}")
+        cancel_single_order(order.id, ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+
     try:
-        if action == "buy":
-            if cash >= order_cost:
-                order_data = MarketOrderRequest(
-                    symbol=ticker, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC,
-                    take_profit={"limit_price": tp}, stop_loss={"stop_price": sl}
-                )
-                order = alpaca_client.submit_order(order_data)
-                portfolio["cash"] -= order_cost
-                position["long"] += qty
-                position["long_cost_basis"] = ((position["long_cost_basis"] * (position["long"] - qty)) + order_cost) / position["long"] if position["long"] else 0.0
-                position["long_tp"] = tp
-                position["long_sl"] = sl
-                print(f"Buy order placed: {order.id} for {qty} shares of {ticker} at ${current_price:.2f}, TP ${tp:.2f}, SL ${sl:.2f}")
-        elif action == "sell":
-            if position["long"] >= qty:
-                order_data = MarketOrderRequest(symbol=ticker, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC)
-                order = alpaca_client.submit_order(order_data)
-                portfolio["cash"] += order_cost
-                realized_gain = (current_price - position["long_cost_basis"]) * qty
-                portfolio["realized_gains"][ticker]["long"] += realized_gain
-                position["long"] -= qty
-                if position["long"] == 0:
-                    position["long_tp"] = position["long_sl"] = 0.0
-                print(f"Sell order placed: {order.id} for {qty} shares of {ticker} at ${current_price:.2f}, Gain: ${realized_gain:.2f}")
-        elif action == "short":
+        if action == "buy" and cash >= order_cost:
             order_data = MarketOrderRequest(
-                symbol=ticker, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
-                take_profit={"limit_price": tp}, stop_loss={"stop_price": sl}
+                symbol=ticker, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
             )
+            # Only set TP/SL if valid (TP > price > SL)
+            if tp > current_price and sl < current_price and tp > sl:
+                order_data.take_profit = {"limit_price": tp}
+                order_data.stop_loss = {"stop_price": sl}
+            order = alpaca_client.submit_order(order_data)
+            portfolio["cash"] -= order_cost
+            position["long"] += qty
+            position["long_cost_basis"] = ((position["long_cost_basis"] * (position["long"] - qty)) + order_cost) / position["long"] if position["long"] else 0.0
+            position["long_tp"] = tp if tp > current_price else 0.0
+            position["long_sl"] = sl if sl < current_price else 0.0
+            print(f"Buy order placed: {order.id} for {qty} shares of {ticker} at ${current_price:.2f}")
+        elif action == "sell" and position["long"] >= qty:
+            order_data = MarketOrderRequest(symbol=ticker, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC)
+            order = alpaca_client.submit_order(order_data)
+            portfolio["cash"] += order_cost
+            realized_gain = (current_price - position["long_cost_basis"]) * qty
+            portfolio["realized_gains"][ticker]["long"] += realized_gain
+            position["long"] -= qty
+            if position["long"] == 0:
+                position["long_tp"] = position["long_sl"] = 0.0
+            print(f"Sell order placed: {order.id} for {qty} shares of {ticker} at ${current_price:.2f}, Gain: ${realized_gain:.2f}")
+        elif action == "short":
+            order_data = MarketOrderRequest(symbol=ticker, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC)
+            # For short: TP < price < SL
+            if tp < current_price and sl > current_price and tp < sl:
+                order_data.take_profit = {"limit_price": tp}
+                order_data.stop_loss = {"stop_price": sl}
             order = alpaca_client.submit_order(order_data)
             position["short"] += qty
             position["short_cost_basis"] = ((position["short_cost_basis"] * (position["short"] - qty)) + order_cost) / position["short"] if position["short"] else 0.0
-            position["short_tp"] = tp
-            position["short_sl"] = sl
+            position["short_tp"] = tp if tp < current_price else 0.0
+            position["short_sl"] = sl if sl > current_price else 0.0
             portfolio["cash"] += order_cost
-            print(f"Short order placed: {order.id} for {qty} shares of {ticker} at ${current_price:.2f}, TP ${tp:.2f}, SL ${sl:.2f}")
-        elif action == "cover":
-            if position["short"] >= qty:
-                order_data = MarketOrderRequest(symbol=ticker, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
-                order = alpaca_client.submit_order(order_data)
-                portfolio["cash"] -= order_cost
-                realized_gain = (position["short_cost_basis"] - current_price) * qty
-                portfolio["realized_gains"][ticker]["short"] += realized_gain
-                position["short"] -= qty
-                if position["short"] == 0:
-                    position["short_tp"] = position["short_sl"] = 0.0
-                print(f"Cover order placed: {order.id} for {qty} shares of {ticker} at ${current_price:.2f}, Gain: ${realized_gain:.2f}")
+            print(f"Short order placed: {order.id} for {qty} shares of {ticker} at ${current_price:.2f}")
+        elif action == "cover" and position["short"] >= qty:
+            order_data = MarketOrderRequest(symbol=ticker, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
+            order = alpaca_client.submit_order(order_data)
+            portfolio["cash"] -= order_cost
+            realized_gain = (position["short_cost_basis"] - current_price) * qty
+            portfolio["realized_gains"][ticker]["short"] += realized_gain
+            position["short"] -= qty
+            if position["short"] == 0:
+                position["short_tp"] = position["short_sl"] = 0.0
+            print(f"Cover order placed: {order.id} for {qty} shares of {ticker} at ${current_price:.2f}, Gain: ${realized_gain:.2f}")
         else:
+            print(f"Invalid action or insufficient conditions for {ticker}: {action}, Qty: {qty}, Cash: ${cash:.2f}")
             return
 
         portfolio["positions"][ticker] = position
@@ -109,6 +132,7 @@ def place_alpaca_order(ticker: str, qty: float, action: str, tp: float, sl: floa
         print(f"Error placing order for {ticker}: {e}")
 
 def run_hedge_fund(tickers, start_date, end_date, portfolio, show_reasoning, selected_analysts, model_name, model_provider, current_prices):
+    print(f"Running hedge fund with analysts: {selected_analysts}")
     progress.start()
     try:
         workflow = create_workflow(selected_analysts)
@@ -214,21 +238,21 @@ if __name__ == "__main__":
             # Use Eastern Time (ET) for market hours check
             et_timezone = pytz.timezone("America/New_York")
             now = datetime.now(et_timezone)
-            if now.hour < 9 or (now.hour == 9 and now.minute < 30) or now.hour >= 16:
-                print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Market closed. Waiting...")
-                time.sleep(60)
-                continue
+            # if now.hour < 9 or (now.hour == 9 and now.minute < 30) or now.hour >= 16:
+            #     print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Market closed. Waiting...")
+            #     time.sleep(60)
+            #     continue
 
             print(f"\n[{now.strftime('%Y-%m-%d %H:%M:%S')}] Running trading cycle...")
             end_date = now.strftime("%Y-%m-%d")
-            start_date = (datetime.strptime(end_date, "%Y-%m-%d") - relativedelta(days=1)).strftime("%Y-%m-%d")  # Changed to 1 day for runtime=1
+            start_date = (datetime.strptime(end_date, "%Y-%m-%d") - relativedelta(days=1)).strftime("%Y-%m-%d")
             current_prices = {}
             for ticker in tickers:
-                prices = get_prices(ticker, start_date=start_date, end_date=end_date)  # Use full range
+                prices = get_prices(ticker, start_date=start_date, end_date=end_date)
                 if prices:
-                    current_prices[ticker] = prices[-1].close  # Latest close
+                    current_prices[ticker] = prices[-1].close
                 else:
-                    current_prices[ticker] = get_latest_price(ticker)  # Fallback
+                    current_prices[ticker] = get_latest_price(ticker)
                     print(f"Using latest price for {ticker} as no historical data found")
 
             # Check TP/SL manually
