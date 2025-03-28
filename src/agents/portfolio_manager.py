@@ -179,17 +179,18 @@ def generate_trading_decision(
     )
 
     # Ensure TP/SL are computed correctly if LLM fails to follow rules
-    for ticker, decision in output.decisions.items():
-        price = current_prices.get(ticker, 0.0)
-        if price > 0 and decision.action in ["buy", "short"]:
-            confidence = decision.confidence
-            if confidence > 80:
-                tp_factor, sl_factor = (1.15, 0.97) if decision.action == "buy" else (0.85, 1.03)
-            elif 50 <= confidence <= 80:
-                tp_factor, sl_factor = (1.10, 0.95) if decision.action == "buy" else (0.90, 1.05)
-            else:
-                tp_factor, sl_factor = (1.05, 0.90) if decision.action == "buy" else (0.95, 1.10)
-            decision.take_profit = round(price * tp_factor, 2)
-            decision.stop_loss = round(price * sl_factor, 2)
+    if output and output.decisions:
+        for ticker, decision in output.decisions.items():
+            price = current_prices.get(ticker, 0.0)
+            if price > 0 and decision.action in ["buy", "short"]:
+                confidence = decision.confidence
+                if confidence > 80:
+                    tp_factor, sl_factor = (1.15, 0.97) if decision.action == "buy" else (0.85, 1.03)
+                elif 50 <= confidence <= 80:
+                    tp_factor, sl_factor = (1.10, 0.95) if decision.action == "buy" else (0.90, 1.05)
+                else:
+                    tp_factor, sl_factor = (1.05, 0.90) if decision.action == "buy" else (0.95, 1.10)
+                decision.take_profit = round(price * tp_factor, 2)
+                decision.stop_loss = round(price * sl_factor, 2)
 
     return output
