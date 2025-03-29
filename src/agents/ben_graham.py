@@ -1,11 +1,11 @@
 from graph.state import AgentState, show_agent_reasoning
 from tools.api import (
-    get_financial_metrics,
     get_market_cap,
     search_line_items,
     get_insider_trades,
     get_company_news,
     get_prices,
+    get_dividend_history,
 )
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
@@ -15,6 +15,7 @@ from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
 import math
+import numpy as np
 
 
 class BenGrahamSignal(BaseModel):
@@ -30,7 +31,7 @@ def ben_graham_agent(state: AgentState):
     2. Solid financial strength (low debt, adequate liquidity).
     3. Discount to intrinsic value (e.g., Graham Number or net-net).
     4. Adequate margin of safety.
-    Incorporates additional data (insider trades, news, prices) conservatively.
+    Incorporates additional data (insider trades, news, prices, dividends) conservatively.
     """
     data = state["data"]
     start_date = data["start_date"]
@@ -41,9 +42,6 @@ def ben_graham_agent(state: AgentState):
     graham_analysis = {}
 
     for ticker in tickers:
-        progress.update_status("ben_graham_agent", ticker, "Fetching financial metrics")
-        metrics = get_financial_metrics(ticker, end_date, period="annual", limit=10)
-
         progress.update_status("ben_graham_agent", ticker, "Gathering financial line items")
         financial_line_items = search_line_items(
             ticker,
@@ -51,23 +49,26 @@ def ben_graham_agent(state: AgentState):
                 "earnings_per_share",
                 "revenue",
                 "net_income",
-                "book_value_per_share",
                 "total_assets",
                 "total_liabilities",
                 "current_assets",
                 "current_liabilities",
-                "dividends_and_other_cash_distributions",
                 "outstanding_shares",
+                "shareholders_equity",
             ],
             end_date,
             period="annual",
             limit=10,
         )
+        if not financial_line_items:
+            progress.update_status("ben_graham_agent", ticker, "Warning: No financial line items retrieved")
+        else:
+            latest = financial_line_items[0]
+            progress.update_status("ben_graham_agent", ticker, f"Data check: EPS={getattr(latest, 'earnings_per_share', 'N/A')}, Current Assets={getattr(latest, 'current_assets', 'N/A')}, Current Liabilities={getattr(latest, 'current_liabilities', 'N/A')}")
 
         progress.update_status("ben_graham_agent", ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date)
 
-        # Additional data from Stanley's approach, used conservatively
         progress.update_status("ben_graham_agent", ticker, "Fetching insider trades")
         insider_trades = get_insider_trades(ticker, end_date, start_date=None, limit=50)
         if not insider_trades:
@@ -78,15 +79,24 @@ def ben_graham_agent(state: AgentState):
         if not company_news:
             progress.update_status("ben_graham_agent", ticker, "No company news available")
 
+        progress.update_status("ben_graham_agent", ticker, "Fetching dividend history")
+        dividends = get_dividend_history(ticker, end_date, start_date=None, limit=10)
+        if not dividends:
+            progress.update_status("ben_graham_agent", ticker, "No dividend history available")
+        else:
+            progress.update_status("ben_graham_agent", ticker, f"Dividend check: {len(dividends)} payments found")
+
         progress.update_status("ben_graham_agent", ticker, "Fetching recent price data")
         prices = get_prices(ticker, start_date=start_date, end_date=end_date)
+        if len(prices) < 90:
+            progress.update_status("ben_graham_agent", ticker, f"Warning: Only {len(prices)} days of price data retrieved")
 
         # Perform sub-analyses
         progress.update_status("ben_graham_agent", ticker, "Analyzing earnings stability")
         earnings_analysis = analyze_earnings_stability(financial_line_items)
 
         progress.update_status("ben_graham_agent", ticker, "Analyzing financial strength")
-        strength_analysis = analyze_financial_strength(financial_line_items)
+        strength_analysis = analyze_financial_strength(financial_line_items, dividends)
 
         progress.update_status("ben_graham_agent", ticker, "Analyzing Graham valuation")
         valuation_analysis = analyze_valuation_graham(financial_line_items, market_cap, prices)
@@ -125,6 +135,7 @@ def ben_graham_agent(state: AgentState):
             "valuation_analysis": valuation_analysis,
             "insider_analysis": insider_analysis,
             "sentiment_analysis": sentiment_analysis,
+            "dividend_history": {"count": len(dividends), "details": "; ".join([f"${d['amount']:.2f} on {d['date']}" for d in dividends])},
         }
 
         progress.update_status("ben_graham_agent", ticker, "Generating Ben Graham analysis")
@@ -166,7 +177,7 @@ def analyze_earnings_stability(financial_line_items: list) -> dict:
     if not financial_line_items:
         return {"score": score, "details": "Insufficient data for earnings stability analysis"}
 
-    eps_vals = [getattr(item, "earnings_per_share", None) for item in financial_line_items if hasattr(item, "earnings_per_share")]
+    eps_vals = [getattr(item, "earnings_per_share", None) for item in financial_line_items]
 
     if len(eps_vals) < 2:
         details.append("Not enough multi-year EPS data.")
@@ -195,71 +206,77 @@ def analyze_earnings_stability(financial_line_items: list) -> dict:
     else:
         details.append("EPS did not grow from earliest to latest period or data missing.")
 
-    final_score = min(10, score * (10 / 7))  # Scale to 0-10
+    final_score = min(10, score * (10 / 7))  # Scale to 0-10, max raw score 7
     return {"score": final_score, "details": "; ".join(details)}
 
-
-def analyze_financial_strength(financial_line_items: list) -> dict:
+def analyze_financial_strength(financial_line_items: list, dividends: list) -> dict:
     """
     Graham checks liquidity (current ratio >= 2), manageable debt,
     and dividend record (preferably some history of dividends).
     """
+    if not financial_line_items:
+        return {
+            "score": 0,
+            "details": "No financial data available",
+            "current_ratio": 0,
+            "debt_ratio": 0,
+            "financial_strength": "weak"
+        }
+
+    latest = financial_line_items[0]
+
+    # Safely extract values with defaults
+    def safe_get(attr, default=0):
+        val = getattr(latest, attr, default)
+        return val if val is not None else default
+
+    current_assets = safe_get("current_assets")
+    current_liabilities = safe_get("current_liabilities", 1)  # Avoid division by zero
+    total_assets = safe_get("total_assets", 1)
+    total_liabilities = safe_get("total_liabilities")
+
+    # Calculate ratios
+    current_ratio = current_assets / current_liabilities
+    debt_ratio = total_liabilities / total_assets
+
+    # Scoring
     score = 0
     details = []
 
-    if not financial_line_items:
-        return {"score": score, "details": "No data for financial strength analysis"}
-
-    latest_item = financial_line_items[0]  # Most recent
-    total_assets = getattr(latest_item, "total_assets", 0)
-    total_liabilities = getattr(latest_item, "total_liabilities", 0)
-    current_assets = getattr(latest_item, "current_assets", 0)
-    current_liabilities = getattr(latest_item, "current_liabilities", 0)
-
-    # 1. Current ratio
-    if current_liabilities > 0:
-        current_ratio = current_assets / current_liabilities
-        if current_ratio >= 2.0:
-            score += 4
-            details.append(f"Current ratio = {current_ratio:.2f} (>=2.0: solid).")
-        elif current_ratio >= 1.5:
-            score += 2
-            details.append(f"Current ratio = {current_ratio:.2f} (moderately strong).")
-        else:
-            details.append(f"Current ratio = {current_ratio:.2f} (<1.5: weaker liquidity).")
+    # Current ratio analysis
+    if current_ratio >= 2.0:
+        score += 4
+        details.append(f"Strong current ratio: {current_ratio:.2f}")
+    elif current_ratio >= 1.5:
+        score += 2
+        details.append(f"Moderate current ratio: {current_ratio:.2f}")
     else:
-        details.append("Cannot compute current ratio (missing or zero current_liabilities).")
+        details.append(f"Weak current ratio: {current_ratio:.2f}")
 
-    # 2. Debt vs. Assets
-    if total_assets > 0:
-        debt_ratio = total_liabilities / total_assets
-        if debt_ratio < 0.5:
-            score += 4
-            details.append(f"Debt ratio = {debt_ratio:.2f}, under 0.50 (conservative).")
-        elif debt_ratio < 0.8:
-            score += 2
-            details.append(f"Debt ratio = {debt_ratio:.2f}, somewhat high but acceptable.")
-        else:
-            details.append(f"Debt ratio = {debt_ratio:.2f}, high by Graham standards.")
+    # Debt ratio analysis
+    if debt_ratio < 0.5:
+        score += 4
+        details.append(f"Conservative debt ratio: {debt_ratio:.2f}")
+    elif debt_ratio < 0.7:
+        score += 2
+        details.append(f"Moderate debt ratio: {debt_ratio:.2f}")
     else:
-        details.append("Cannot compute debt ratio (missing total_assets).")
+        details.append(f"High debt ratio: {debt_ratio:.2f}")
 
-    # 3. Dividend track record
-    div_periods = [getattr(item, "dividends_and_other_cash_distributions", None) for item in financial_line_items if hasattr(item, "dividends_and_other_cash_distributions")]
-    if div_periods:
-        div_paid_years = sum(1 for d in div_periods if d is not None and d < 0)  # Negative indicates payout
-        total_div_periods = len([d for d in div_periods if d is not None])
-        if total_div_periods > 0 and div_paid_years >= (total_div_periods // 2 + 1):
-            score += 2
-            details.append(f"Dividends paid in {div_paid_years}/{total_div_periods} years.")
-        else:
-            details.append(f"Dividends paid in only {div_paid_years}/{total_div_periods} years or insufficient data.")
+    if dividends and len(dividends) >= 5 and sum(d["amount"] for d in dividends) >= 0.1 * len(dividends):
+        score += 2
+        details.append(f"Stable dividend history: {len(dividends)} payments, total ${sum(d['amount'] for d in dividends):.2f}")
     else:
-        details.append("No dividend data available.")
+        details.append(f"No stable dividend history: {len(dividends)} payments, total ${sum(d['amount'] for d in dividends) if dividends else 0:.2f}")
 
-    final_score = min(10, score * (10 / 10))  # Scale to 0-10
-    return {"score": final_score, "details": "; ".join(details)}
-
+    strength = "strong" if score >= 9 else "moderate" if score >= 5 else "weak"
+    return {
+        "score": min(10, score),
+        "details": "; ".join(details),
+        "current_ratio": current_ratio,
+        "debt_ratio": debt_ratio,
+        "financial_strength": strength
+    }
 
 def analyze_valuation_graham(financial_line_items: list, market_cap: float, prices: list) -> dict:
     """
@@ -269,18 +286,22 @@ def analyze_valuation_graham(financial_line_items: list, market_cap: float, pric
     3. Compare current price to Graham Number for margin of safety
     4. Check price stability (low volatility preferred)
     """
+    score = 0
+    details = []
+
     if not financial_line_items or not market_cap or market_cap <= 0 or not prices:
-        return {"score": 0, "details": "Insufficient data for valuation"}
+        return {"score": score, "details": "Insufficient data for valuation"}
 
     latest = financial_line_items[0]  # Most recent
-    current_assets = getattr(latest, "current_assets", 0)
-    total_liabilities = getattr(latest, "total_liabilities", 0)
-    book_value_ps = getattr(latest, "book_value_per_share", 0)
-    eps = getattr(latest, "earnings_per_share", 0)
-    shares_outstanding = getattr(latest, "outstanding_shares", 0)
 
-    details = []
-    score = 0
+    # Safely handle None values with defaults
+    equity = getattr(latest, "shareholders_equity", 0) or 0
+    shares = getattr(latest, "outstanding_shares", 0) or 0
+    current_assets = getattr(latest, "current_assets", 0) or 0
+    total_liabilities = getattr(latest, "total_liabilities", 0) or 0
+    book_value_ps = equity / shares if shares > 0 else 0
+    eps = getattr(latest, "earnings_per_share", 0) or 0
+    shares_outstanding = shares
 
     # 1. Net-Net Check
     net_current_asset_value = current_assets - total_liabilities
@@ -290,14 +311,14 @@ def analyze_valuation_graham(financial_line_items: list, market_cap: float, pric
         details.append(f"NCAV Per Share = {ncav_ps:.2f}, Price Per Share = {price_per_share:.2f}")
         if ncav_ps > price_per_share:
             score += 4
-            details.append("Net-Net: NCAV exceeds price (strong value).")
+            details.append("Net-Net: NCAV exceeds price (strong value)")
         elif ncav_ps >= (price_per_share * 0.67):
             score += 2
-            details.append("NCAV >= 2/3 of price (moderate value).")
+            details.append("NCAV >= 2/3 of price (moderate value)")
         else:
-            details.append("NCAV below 2/3 of price.")
+            details.append("NCAV below 2/3 of price")
     else:
-        details.append("Insufficient data for net-net valuation.")
+        details.append("Insufficient data for net-net valuation")
 
     # 2. Graham Number
     graham_number = None
@@ -305,7 +326,7 @@ def analyze_valuation_graham(financial_line_items: list, market_cap: float, pric
         graham_number = math.sqrt(22.5 * eps * book_value_ps)
         details.append(f"Graham Number = {graham_number:.2f}")
     else:
-        details.append("Cannot compute Graham Number (EPS or BVPS missing/<=0).")
+        details.append("Cannot compute Graham Number (EPS or BVPS missing/<=0)")
 
     # 3. Margin of Safety
     if graham_number and shares_outstanding > 0:
@@ -315,41 +336,33 @@ def analyze_valuation_graham(financial_line_items: list, market_cap: float, pric
             details.append(f"Margin of Safety = {margin_of_safety:.2%}")
             if margin_of_safety > 0.5:
                 score += 4
-                details.append("Price well below Graham Number (>=50% margin).")
+                details.append("Price well below Graham Number (>=50% margin)")
             elif margin_of_safety > 0.2:
                 score += 2
-                details.append("Some margin of safety (>20%).")
+                details.append("Some margin of safety (>20%)")
             else:
-                details.append("Low or negative margin of safety.")
+                details.append("Low or negative margin of safety")
     else:
-        details.append("Cannot compute margin of safety.")
+        details.append("Cannot compute margin of safety")
 
-    # 4. Price Stability (Graham prefers low volatility)
-    if len(prices) > 10:
-        close_prices = [p.close for p in prices if p.close is not None]
-        if len(close_prices) > 10:
-            daily_returns = [(close_prices[i] - close_prices[i-1]) / close_prices[i-1] for i in range(1, len(close_prices)) if close_prices[i-1] > 0]
-            if daily_returns:
-                import statistics
-                volatility = statistics.pstdev(daily_returns)
-                if volatility < 0.02:
-                    score += 2
-                    details.append(f"Low volatility: {volatility:.2%}")
-                elif volatility < 0.04:
-                    score += 1
-                    details.append(f"Moderate volatility: {volatility:.2%}")
-                else:
-                    details.append(f"High volatility: {volatility:.2%}")
+    if prices and len(prices) >= 30:  # Relaxed from 90 to 30
+        close_prices = [getattr(p, "close", 0) for p in prices]
+        if len(close_prices) >= 30:
+            returns = np.diff(close_prices) / close_prices[:-1]
+            volatility = np.std(returns) * np.sqrt(252)
+            if volatility < 0.20:
+                score += 2
+                details.append(f"Low volatility: {volatility:.2%}")
+            elif volatility < 0.30:
+                score += 1
+                details.append(f"Moderate volatility: {volatility:.2%}")
             else:
-                details.append("Insufficient returns data for volatility.")
-        else:
-            details.append("Not enough price data for volatility.")
+                details.append(f"High volatility: {volatility:.2%}")
     else:
-        details.append("Insufficient price history.")
+        details.append("Insufficient price history (<30 days)")
 
-    final_score = min(10, score * (10 / 10))  # Scale to 0-10
+    final_score = min(10, score * (10 / 10))  # Scale to 0-10, max raw score 10
     return {"score": final_score, "details": "; ".join(details)}
-
 
 def analyze_insider_activity(insider_trades: list) -> dict:
     """
@@ -364,26 +377,27 @@ def analyze_insider_activity(insider_trades: list) -> dict:
 
     buys, sells = 0, 0
     for trade in insider_trades:
-        if trade.transaction_shares is not None:
-            if trade.transaction_shares > 0:
-                buys += 1
-            elif trade.transaction_shares < 0:
-                sells += 1
+        shares = trade.get("shares", 0)
+        transaction_type = trade.get("transaction_type", "").lower()
+        if "buy" in transaction_type:
+            buys += shares
+        elif "sell" in transaction_type:
+            sells += abs(shares)
 
     total = buys + sells
     if total == 0:
         details.append("No buy/sell transactions found.")
         return {"score": score, "details": "; ".join(details)}
 
-    buy_ratio = buys / total
+    buy_ratio = buys / total if total > 0 else 0
     if buy_ratio > 0.7:
         score = 7
-        details.append(f"Mostly insider buying: {buys} buys vs. {sells} sells.")
+        details.append(f"Mostly insider buying: {buys} shares bought vs. {sells} sold.")
     elif buy_ratio < 0.3:
         score = 3
-        details.append(f"Heavy insider selling: {buys} buys vs. {sells} sells.")
+        details.append(f"Heavy insider selling: {buys} shares bought vs. {sells} sold.")
     else:
-        details.append(f"Balanced insider activity: {buys} buys vs. {sells} sells.")
+        details.append(f"Balanced insider activity: {buys} shares bought vs. {sells} sold.")
 
     return {"score": score, "details": "; ".join(details)}
 
@@ -400,7 +414,7 @@ def analyze_sentiment(news_items: list) -> dict:
         return {"score": score, "details": "; ".join(details)}
 
     negative_keywords = ["lawsuit", "fraud", "investigation", "decline", "bankruptcy"]
-    negative_count = sum(1 for news in news_items if any(word in (news.title or "").lower() for word in negative_keywords))
+    negative_count = sum(1 for news in news_items if any(word in (getattr(news, "title", "") or "").lower() for word in negative_keywords))
 
     if negative_count > len(news_items) * 0.3:
         score = 3

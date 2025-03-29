@@ -14,6 +14,7 @@ import json
 from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
+import numpy as np
 
 
 class CathieWoodSignal(BaseModel):
@@ -84,7 +85,7 @@ def cathie_wood_agent(state: AgentState):
         disruptive_analysis = analyze_disruptive_potential(metrics, financial_line_items)
 
         progress.update_status("cathie_wood_agent", ticker, "Analyzing innovation-driven growth")
-        innovation_analysis = analyze_innovation_growth(metrics, financial_line_items)
+        innovation_analysis = analyze_innovation_growth(metrics, financial_line_items, prices)
 
         progress.update_status("cathie_wood_agent", ticker, "Analyzing valuation")
         valuation_analysis = analyze_cathie_wood_valuation(financial_line_items, market_cap, prices)
@@ -166,7 +167,7 @@ def analyze_disruptive_potential(metrics: list, financial_line_items: list) -> d
         return {"score": 0, "details": "Insufficient data to analyze disruptive potential"}
 
     # 1. Revenue Growth Acceleration
-    revenues = [getattr(item, "revenue", None) for item in financial_line_items if hasattr(item, "revenue")]
+    revenues = [getattr(item, "revenue", None) for item in financial_line_items]
     valid_revenues = [r for r in revenues if r is not None]
     if len(valid_revenues) >= 3:
         growth_rates = []
@@ -188,7 +189,7 @@ def analyze_disruptive_potential(metrics: list, financial_line_items: list) -> d
         details.append("Insufficient revenue data.")
 
     # 2. R&D Intensity
-    rd_expenses = [getattr(item, "research_and_development", None) for item in financial_line_items if hasattr(item, "research_and_development")]
+    rd_expenses = [getattr(item, "research_and_development", None) for item in financial_line_items]
     valid_rd = [r for r in rd_expenses if r is not None]
     if valid_rd and valid_revenues:
         rd_intensity = valid_rd[0] / valid_revenues[0] if valid_revenues[0] > 0 else 0  # Latest period
@@ -202,7 +203,7 @@ def analyze_disruptive_potential(metrics: list, financial_line_items: list) -> d
         details.append("No R&D data.")
 
     # 3. Gross Margin Trends
-    gross_margins = [getattr(item, "gross_margin", None) for item in financial_line_items if hasattr(item, "gross_margin")]
+    gross_margins = [getattr(item, "gross_margin", None) for item in financial_line_items]
     valid_margins = [m for m in gross_margins if m is not None]
     if len(valid_margins) >= 2:
         trend = valid_margins[0] - valid_margins[-1]  # Latest - Oldest
@@ -216,7 +217,7 @@ def analyze_disruptive_potential(metrics: list, financial_line_items: list) -> d
         details.append("Insufficient gross margin data.")
 
     # 4. Operating Leverage
-    op_expenses = [getattr(item, "operating_expense", None) for item in financial_line_items if hasattr(item, "operating_expense")]
+    op_expenses = [getattr(item, "operating_expense", None) for item in financial_line_items]
     valid_op_ex = [e for e in op_expenses if e is not None]
     if len(valid_revenues) >= 2 and len(valid_op_ex) >= 2:
         rev_growth = (valid_revenues[0] - valid_revenues[-1]) / valid_revenues[-1] if valid_revenues[-1] > 0 else 0
@@ -227,17 +228,18 @@ def analyze_disruptive_potential(metrics: list, financial_line_items: list) -> d
     else:
         details.append("Insufficient data for operating leverage.")
 
-    final_score = min(10, score * (10 / 12))  # Scale to 0-10
+    final_score = min(10, score * (10 / 12))  # Scale to 0-10, max raw score 12
     return {"score": final_score, "details": "; ".join(details)}
 
 
-def analyze_innovation_growth(metrics: list, financial_line_items: list) -> dict:
+def analyze_innovation_growth(metrics: list, financial_line_items: list, prices: list) -> dict:
     """
     Evaluate innovation and growth potential:
     1. R&D Investment Trends
     2. Free Cash Flow Generation
     3. Operating Efficiency
     4. Capital Allocation
+    5. Price Volatility (Cathie tolerates volatility for growth)
     """
     score = 0
     details = []
@@ -246,8 +248,8 @@ def analyze_innovation_growth(metrics: list, financial_line_items: list) -> dict
         return {"score": 0, "details": "Insufficient data to analyze innovation-driven growth"}
 
     # 1. R&D Investment Trends
-    rd_expenses = [getattr(item, "research_and_development", None) for item in financial_line_items if hasattr(item, "research_and_development")]
-    revenues = [getattr(item, "revenue", None) for item in financial_line_items if hasattr(item, "revenue")]
+    rd_expenses = [getattr(item, "research_and_development", None) for item in financial_line_items]
+    revenues = [getattr(item, "revenue", None) for item in financial_line_items]
     valid_rd = [r for r in rd_expenses if r is not None]
     valid_rev = [r for r in revenues if r is not None]
     if len(valid_rd) >= 2 and len(valid_rev) >= 2:
@@ -262,7 +264,7 @@ def analyze_innovation_growth(metrics: list, financial_line_items: list) -> dict
         details.append("Insufficient R&D data.")
 
     # 2. Free Cash Flow Generation
-    fcf_vals = [getattr(item, "free_cash_flow", None) for item in financial_line_items if hasattr(item, "free_cash_flow")]
+    fcf_vals = [getattr(item, "free_cash_flow", None) for item in financial_line_items]
     valid_fcf = [f for f in fcf_vals if f is not None]
     if valid_fcf:
         positive_fcf = sum(1 for f in valid_fcf if f > 0)
@@ -273,7 +275,7 @@ def analyze_innovation_growth(metrics: list, financial_line_items: list) -> dict
         details.append("No FCF data.")
 
     # 3. Operating Efficiency
-    op_margins = [getattr(item, "operating_margin", None) for item in financial_line_items if hasattr(item, "operating_margin")]
+    op_margins = [getattr(item, "operating_margin", None) for item in financial_line_items]
     valid_op_margins = [m for m in op_margins if m is not None]
     if len(valid_op_margins) >= 2 and valid_op_margins[0] > 0.15:
         score += 3
@@ -285,7 +287,7 @@ def analyze_innovation_growth(metrics: list, financial_line_items: list) -> dict
         details.append("No operating margin data.")
 
     # 4. Capital Allocation
-    capex = [getattr(item, "capital_expenditure", None) for item in financial_line_items if hasattr(item, "capital_expenditure")]
+    capex = [getattr(item, "capital_expenditure", None) for item in financial_line_items]
     valid_capex = [c for c in capex if c is not None]
     if len(valid_capex) >= 2 and valid_rev:
         capex_intensity = abs(valid_capex[0]) / valid_rev[0] if valid_rev[0] > 0 else 0
@@ -295,7 +297,24 @@ def analyze_innovation_growth(metrics: list, financial_line_items: list) -> dict
     else:
         details.append("Insufficient CAPEX data.")
 
-    final_score = min(10, score * (10 / 12))  # Scale to 0-10
+    # 5. Price Volatility (Cathie tolerates volatility for growth)
+    if prices and len(prices) >= 90:
+        close_prices = [getattr(p, "close", 0) for p in prices]
+        if len(close_prices) >= 90:
+            returns = np.diff(close_prices) / close_prices[:-1]
+            volatility = np.std(returns) * np.sqrt(252)
+            if volatility > 0.40:
+                score += 2
+                details.append(f"High price volatility: {volatility:.2%} (acceptable for growth)")
+            elif volatility > 0.20:
+                score += 1
+                details.append(f"Moderate price volatility: {volatility:.2%}")
+            else:
+                details.append(f"Low price volatility: {volatility:.2%}")
+    else:
+        details.append("Insufficient price data for volatility analysis")
+
+    final_score = min(10, score * (10 / 14))  # Scale to 0-10, max raw score 14
     return {"score": final_score, "details": "; ".join(details)}
 
 
@@ -337,20 +356,25 @@ def analyze_cathie_wood_valuation(financial_line_items: list, market_cap: float,
         score += 3
 
     # Volatility Tolerance (Cathie accepts high volatility)
-    if len(prices) > 10:
-        close_prices = [p.close for p in prices if p.close is not None]
-        if len(close_prices) > 10:
-            daily_returns = [(close_prices[i] - close_prices[i-1]) / close_prices[i-1] for i in range(1, len(close_prices)) if close_prices[i-1] > 0]
-            if daily_returns:
-                import statistics
-                volatility = statistics.pstdev(daily_returns)
-                details.append(f"Volatility: {volatility:.2%}")
-                if volatility > 0.04:  # High volatility is fine for Cathie
-                    score += 2
+    if prices and len(prices) >= 90:
+        close_prices = [getattr(p, "close", 0) for p in prices]
+        if len(close_prices) >= 90:
+            returns = np.diff(close_prices) / close_prices[:-1]
+            volatility = np.std(returns) * np.sqrt(252)
+            details.append(f"Volatility: {volatility:.2%}")
+            if volatility > 0.40:
+                score += 3
+                details.append(f"High volatility: {volatility:.2%} (acceptable for growth)")
+            elif volatility > 0.20:
+                score += 2
+                details.append(f"Moderate volatility: {volatility:.2%}")
+            else:
+                score += 1
+                details.append(f"Low volatility: {volatility:.2%}")
     else:
         details.append("Insufficient price data.")
 
-    final_score = min(10, score)
+    final_score = min(10, score * (10 / 9))  # Scale to 0-10, max raw score 9
     return {"score": final_score, "details": "; ".join(details)}
 
 
@@ -367,10 +391,11 @@ def analyze_insider_activity(insider_trades: list) -> dict:
 
     buys, sells = 0, 0
     for trade in insider_trades:
-        if trade.transaction_shares is not None:
-            if trade.transaction_shares > 0:
+        shares = getattr(trade, "transaction_shares", None)
+        if shares is not None:
+            if shares > 0:
                 buys += 1
-            elif trade.transaction_shares < 0:
+            elif shares < 0:
                 sells += 1
 
     total = buys + sells
@@ -404,8 +429,8 @@ def analyze_sentiment(news_items: list) -> dict:
 
     positive_keywords = ["innovation", "breakthrough", "growth", "adoption", "technology"]
     negative_keywords = ["lawsuit", "decline", "investigation"]
-    positive_count = sum(1 for news in news_items if any(word in (news.title or "").lower() for word in positive_keywords))
-    negative_count = sum(1 for news in news_items if any(word in (news.title or "").lower() for word in negative_keywords))
+    positive_count = sum(1 for news in news_items if any(word in (getattr(news, "title", "") or "").lower() for word in positive_keywords))
+    negative_count = sum(1 for news in news_items if any(word in (getattr(news, "title", "") or "").lower() for word in negative_keywords))
 
     if positive_count > negative_count and positive_count >= len(news_items) * 0.3:
         score = 8

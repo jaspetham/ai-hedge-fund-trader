@@ -15,6 +15,7 @@ from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
 import statistics
+import numpy as np
 
 
 class StanleyDruckenmillerSignal(BaseModel):
@@ -82,7 +83,7 @@ def stanley_druckenmiller_agent(state: AgentState):
         if not company_news:
             progress.update_status("stanley_druckenmiller_agent", ticker, "No company news available")
 
-        progress.update_status("stanley_druckenmiller_agent", ticker, "Fetching recent price data for momentum")
+        progress.update_status("stanley_druckenmiller_agent", ticker, "Fetching recent price data")
         prices = get_prices(ticker, start_date=start_date, end_date=end_date)
 
         progress.update_status("stanley_druckenmiller_agent", ticker, "Analyzing growth & momentum")
@@ -148,7 +149,6 @@ def stanley_druckenmiller_agent(state: AgentState):
 
         progress.update_status("stanley_druckenmiller_agent", ticker, "Done")
 
-    # Wrap results in a single message
     message = HumanMessage(content=json.dumps(druck_analysis), name="stanley_druckenmiller_agent")
 
     if state["metadata"].get("show_reasoning"):
@@ -164,20 +164,20 @@ def analyze_growth_and_momentum(financial_line_items: list, prices: list) -> dic
       - Revenue Growth (YoY)
       - EPS Growth (YoY)
       - Price Momentum
+      - Volatility (new)
     """
     if not financial_line_items or len(financial_line_items) < 2:
         return {"score": 0, "details": "Insufficient financial data for growth analysis"}
 
     details = []
-    raw_score = 0  # We'll sum up a maximum of 9 raw points, then scale to 0–10
+    raw_score = 0  # Max 12 points (3 each for 4 metrics), normalized to 10
 
     # 1. Revenue Growth
-    revenues = [fi.revenue for fi in financial_line_items if hasattr(fi, "revenue") and fi.revenue is not None]
+    revenues = [getattr(fi, "revenue", None) for fi in financial_line_items if getattr(fi, "revenue", None) is not None]
     if len(revenues) >= 2:
-        latest_rev = revenues[0]
-        older_rev = revenues[-1]
+        latest_rev, older_rev = revenues[0], revenues[-1]
         if older_rev > 0:
-            rev_growth = (latest_rev - older_rev) / abs(older_rev)
+            rev_growth = (latest_rev - older_rev) / older_rev
             if rev_growth > 0.30:
                 raw_score += 3
                 details.append(f"Strong revenue growth: {rev_growth:.1%}")
@@ -190,15 +190,14 @@ def analyze_growth_and_momentum(financial_line_items: list, prices: list) -> dic
             else:
                 details.append(f"Minimal/negative revenue growth: {rev_growth:.1%}")
         else:
-            details.append("Older revenue is zero/negative; can't compute revenue growth.")
+            details.append("Older revenue is zero/negative")
     else:
-        details.append("Not enough revenue data points for growth calculation.")
+        details.append("Insufficient revenue data")
 
     # 2. EPS Growth
-    eps_values = [fi.earnings_per_share for fi in financial_line_items if hasattr(fi, "earnings_per_share") and fi.earnings_per_share is not None]
+    eps_values = [getattr(fi, "earnings_per_share", None) for fi in financial_line_items if getattr(fi, "earnings_per_share", None) is not None]
     if len(eps_values) >= 2:
-        latest_eps = eps_values[0]
-        older_eps = eps_values[-1]
+        latest_eps, older_eps = eps_values[0], eps_values[-1]
         if abs(older_eps) > 1e-9:
             eps_growth = (latest_eps - older_eps) / abs(older_eps)
             if eps_growth > 0.30:
@@ -213,38 +212,54 @@ def analyze_growth_and_momentum(financial_line_items: list, prices: list) -> dic
             else:
                 details.append(f"Minimal/negative EPS growth: {eps_growth:.1%}")
         else:
-            details.append("Older EPS is near zero; skipping EPS growth calculation.")
+            details.append("Older EPS near zero")
     else:
-        details.append("Not enough EPS data points for growth calculation.")
+        details.append("Insufficient EPS data")
 
     # 3. Price Momentum
     if prices and len(prices) > 30:
-        sorted_prices = sorted(prices, key=lambda p: p.time)
-        close_prices = [p.close for p in sorted_prices if p.close is not None]
-        if len(close_prices) >= 2:
-            start_price = close_prices[0]
-            end_price = close_prices[-1]
-            if start_price > 0:
-                pct_change = (end_price - start_price) / start_price
-                if pct_change > 0.50:
-                    raw_score += 3
-                    details.append(f"Very strong price momentum: {pct_change:.1%}")
-                elif pct_change > 0.20:
-                    raw_score += 2
-                    details.append(f"Moderate price momentum: {pct_change:.1%}")
-                elif pct_change > 0:
-                    raw_score += 1
-                    details.append(f"Slight positive momentum: {pct_change:.1%}")
-                else:
-                    details.append(f"Negative price momentum: {pct_change:.1%}")
+        close_prices = [getattr(p, "close", 0) for p in prices]
+        if len(close_prices) >= 2 and close_prices[0] > 0:
+            pct_change = (close_prices[-1] - close_prices[0]) / close_prices[0]
+            if pct_change > 0.50:
+                raw_score += 3
+                details.append(f"Very strong momentum: {pct_change:.1%}")
+            elif pct_change > 0.20:
+                raw_score += 2
+                details.append(f"Moderate momentum: {pct_change:.1%}")
+            elif pct_change > 0:
+                raw_score += 1
+                details.append(f"Slight momentum: {pct_change:.1%}")
             else:
-                details.append("Invalid start price (<= 0); can't compute momentum.")
+                details.append(f"Negative momentum: {pct_change:.1%}")
         else:
-            details.append("Insufficient price data for momentum calculation.")
+            details.append("Invalid price data for momentum")
     else:
-        details.append("Not enough recent price data for momentum analysis.")
+        details.append("Insufficient price data")
 
-    final_score = min(10, (raw_score / 9) * 10)
+    # 4. Volatility (Druckenmiller favors stability in momentum)
+    if prices and len(prices) > 30:
+        closes = [getattr(p, "close", 0) for p in prices]
+        if len(closes) >= 30:
+            returns = np.diff(closes) / closes[:-1]
+            volatility = np.std(returns) * np.sqrt(252)
+            if volatility < 0.20:
+                raw_score += 3
+                details.append(f"Low volatility: {volatility:.2%}")
+            elif volatility < 0.30:
+                raw_score += 2
+                details.append(f"Moderate volatility: {volatility:.2%}")
+            elif volatility < 0.40:
+                raw_score += 1
+                details.append(f"High volatility: {volatility:.2%}")
+            else:
+                details.append(f"Very high volatility: {volatility:.2%}")
+        else:
+            details.append("Insufficient data for volatility")
+    else:
+        details.append("No price data for volatility")
+
+    final_score = min(10, (raw_score / 12) * 10)
     return {"score": final_score, "details": "; ".join(details)}
 
 
@@ -259,32 +274,33 @@ def analyze_insider_activity(insider_trades: list) -> dict:
     details = []
 
     if not insider_trades:
-        details.append("No insider trades data available; defaulting to neutral")
+        details.append("No insider trades; neutral")
         return {"score": score, "details": "; ".join(details)}
 
     buys, sells = 0, 0
     for trade in insider_trades:
-        if trade.transaction_shares is not None:
-            if trade.transaction_shares > 0:
+        shares = getattr(trade, "transaction_shares", None)
+        if shares is not None:
+            if shares > 0:
                 buys += 1
-            elif trade.transaction_shares < 0:
+            elif shares < 0:
                 sells += 1
 
     total = buys + sells
     if total == 0:
-        details.append("No buy/sell transactions found; neutral")
+        details.append("No transactions; neutral")
         return {"score": score, "details": "; ".join(details)}
 
     buy_ratio = buys / total
     if buy_ratio > 0.7:
         score = 8
-        details.append(f"Heavy insider buying: {buys} buys vs. {sells} sells")
+        details.append(f"Heavy buying: {buys} buys vs {sells} sells")
     elif buy_ratio > 0.4:
         score = 6
-        details.append(f"Moderate insider buying: {buys} buys vs. {sells} sells")
+        details.append(f"Moderate buying: {buys} buys vs {sells} sells")
     else:
         score = 4
-        details.append(f"Mostly insider selling: {buys} buys vs. {sells} sells")
+        details.append(f"Mostly selling: {buys} buys vs {sells} sells")
 
     return {"score": score, "details": "; ".join(details)}
 
@@ -294,19 +310,19 @@ def analyze_sentiment(news_items: list) -> dict:
     Basic news sentiment: negative keyword check vs. overall volume.
     """
     if not news_items:
-        return {"score": 5, "details": "No news data available; defaulting to neutral sentiment"}
+        return {"score": 5, "details": "No news; neutral"}
 
     negative_keywords = ["lawsuit", "fraud", "negative", "downturn", "decline", "investigation", "recall"]
     negative_count = 0
     for news in news_items:
-        title_lower = (news.title or "").lower()
-        if any(word in title_lower for word in negative_keywords):
+        title = getattr(news, "title", "") or ""
+        if any(word in title.lower() for word in negative_keywords):
             negative_count += 1
 
     details = []
     if negative_count > len(news_items) * 0.3:
         score = 3
-        details.append(f"High proportion of negative headlines: {negative_count}/{len(news_items)}")
+        details.append(f"High negative headlines: {negative_count}/{len(news_items)}")
     elif negative_count > 0:
         score = 6
         details.append(f"Some negative headlines: {negative_count}/{len(news_items)}")
@@ -325,15 +341,15 @@ def analyze_risk_reward(financial_line_items: list, market_cap: float | None, pr
     Aims for strong upside with contained downside.
     """
     if not financial_line_items or not prices:
-        return {"score": 0, "details": "Insufficient data for risk-reward analysis"}
+        return {"score": 0, "details": "Insufficient data"}
 
     details = []
-    raw_score = 0
+    raw_score = 0  # Max 6 points (3 each)
 
     # 1. Debt-to-Equity
-    debt_values = [fi.total_debt for fi in financial_line_items if hasattr(fi, "total_debt") and fi.total_debt is not None]
-    equity_values = [fi.shareholders_equity for fi in financial_line_items if hasattr(fi, "shareholders_equity") and fi.shareholders_equity is not None]
-    if debt_values and equity_values and len(debt_values) == len(equity_values) and len(debt_values) > 0:
+    debt_values = [getattr(fi, "total_debt", 0) for fi in financial_line_items]
+    equity_values = [getattr(fi, "shareholders_equity", None) for fi in financial_line_items if getattr(fi, "shareholders_equity", None) is not None]
+    if debt_values and equity_values and len(debt_values) == len(equity_values):
         recent_debt = debt_values[0]
         recent_equity = equity_values[0] if equity_values[0] else 1e-9
         de_ratio = recent_debt / recent_equity
@@ -349,37 +365,29 @@ def analyze_risk_reward(financial_line_items: list, market_cap: float | None, pr
         else:
             details.append(f"High debt-to-equity: {de_ratio:.2f}")
     else:
-        details.append("No consistent debt/equity data available.")
+        details.append("No debt/equity data")
 
-    # 2. Price Volatility
-    if len(prices) > 10:
-        sorted_prices = sorted(prices, key=lambda p: p.time)
-        close_prices = [p.close for p in sorted_prices if p.close is not None]
-        if len(close_prices) > 10:
-            daily_returns = []
-            for i in range(1, len(close_prices)):
-                prev_close = close_prices[i - 1]
-                if prev_close > 0:
-                    daily_returns.append((close_prices[i] - prev_close) / prev_close)
-            if daily_returns:
-                stdev = statistics.pstdev(daily_returns)
-                if stdev < 0.01:
-                    raw_score += 3
-                    details.append(f"Low volatility: daily returns stdev {stdev:.2%}")
-                elif stdev < 0.02:
-                    raw_score += 2
-                    details.append(f"Moderate volatility: daily returns stdev {stdev:.2%}")
-                elif stdev < 0.04:
-                    raw_score += 1
-                    details.append(f"High volatility: daily returns stdev {stdev:.2%}")
-                else:
-                    details.append(f"Very high volatility: daily returns stdev {stdev:.2%}")
+    # 2. Volatility (Druckenmiller avoids excessive risk)
+    if len(prices) > 30:
+        closes = [getattr(p, "close", 0) for p in prices]
+        if len(closes) >= 30:
+            returns = np.diff(closes) / closes[:-1]
+            volatility = np.std(returns) * np.sqrt(252)
+            if volatility < 0.20:
+                raw_score += 3
+                details.append(f"Low volatility: {volatility:.2%}")
+            elif volatility < 0.30:
+                raw_score += 2
+                details.append(f"Moderate volatility: {volatility:.2%}")
+            elif volatility < 0.40:
+                raw_score += 1
+                details.append(f"High volatility: {volatility:.2%}")
             else:
-                details.append("Insufficient daily returns data for volatility calc.")
+                details.append(f"Very high volatility: {volatility:.2%}")
         else:
-            details.append("Not enough close-price data points for volatility analysis.")
+            details.append("Insufficient price data for volatility")
     else:
-        details.append("Not enough price data for volatility analysis.")
+        details.append("No price data for volatility")
 
     final_score = min(10, (raw_score / 6) * 10)
     return {"score": final_score, "details": "; ".join(details)}
@@ -395,90 +403,74 @@ def analyze_druckenmiller_valuation(financial_line_items: list, market_cap: floa
     Each can yield up to 2 points => max 8 raw points => scale to 0–10.
     """
     if not financial_line_items or market_cap is None:
-        return {"score": 0, "details": "Insufficient data to perform valuation"}
+        return {"score": 0, "details": "Insufficient data"}
 
     details = []
-    raw_score = 0
+    raw_score = 0  # Max 8 points (2 each for 4 metrics)
 
-    # Gather needed data
-    net_incomes = [fi.net_income for fi in financial_line_items if hasattr(fi, "net_income") and fi.net_income is not None]
-    fcf_values = [fi.free_cash_flow for fi in financial_line_items if hasattr(fi, "free_cash_flow") and fi.free_cash_flow is not None]
-    ebit_values = [fi.ebit for fi in financial_line_items if hasattr(fi, "ebit") and fi.ebit is not None]
-    ebitda_values = [fi.ebitda for fi in financial_line_items if hasattr(fi, "ebitda") and fi.ebitda is not None]
-    debt_values = [fi.total_debt for fi in financial_line_items if hasattr(fi, "total_debt") and fi.total_debt is not None]
-    cash_values = [fi.cash_and_equivalents for fi in financial_line_items if hasattr(fi, "cash_and_equivalents") and fi.cash_and_equivalents is not None]
-
-    recent_debt = debt_values[0] if debt_values else 0
-    recent_cash = cash_values[0] if cash_values else 0
+    recent_debt = getattr(financial_line_items[0], "total_debt", 0)
+    recent_cash = getattr(financial_line_items[0], "cash_and_equivalents", 0)
     enterprise_value = market_cap + recent_debt - recent_cash
 
-    # 1) P/E
-    recent_net_income = net_incomes[0] if net_incomes else None
+    # 1. P/E
+    recent_net_income = getattr(financial_line_items[0], "net_income", None)
     if recent_net_income and recent_net_income > 0:
         pe = market_cap / recent_net_income
-        pe_points = 0
         if pe < 15:
-            pe_points = 2
+            raw_score += 2
             details.append(f"Attractive P/E: {pe:.2f}")
         elif pe < 25:
-            pe_points = 1
+            raw_score += 1
             details.append(f"Fair P/E: {pe:.2f}")
         else:
-            details.append(f"High or Very high P/E: {pe:.2f}")
-        raw_score += pe_points
+            details.append(f"High P/E: {pe:.2f}")
     else:
-        details.append("No positive net income for P/E calculation")
+        details.append("No net income for P/E")
 
-    # 2) P/FCF
-    recent_fcf = fcf_values[0] if fcf_values else None
+    # 2. P/FCF
+    recent_fcf = getattr(financial_line_items[0], "free_cash_flow", None)
     if recent_fcf and recent_fcf > 0:
         pfcf = market_cap / recent_fcf
-        pfcf_points = 0
         if pfcf < 15:
-            pfcf_points = 2
+            raw_score += 2
             details.append(f"Attractive P/FCF: {pfcf:.2f}")
         elif pfcf < 25:
-            pfcf_points = 1
+            raw_score += 1
             details.append(f"Fair P/FCF: {pfcf:.2f}")
         else:
-            details.append(f"High/Very high P/FCF: {pfcf:.2f}")
-        raw_score += pfcf_points
+            details.append(f"High P/FCF: {pfcf:.2f}")
     else:
         details.append("No positive free cash flow for P/FCF calculation")
 
-    # 3) EV/EBIT
-    recent_ebit = ebit_values[0] if ebit_values else None
+    # 3. EV/EBIT
+    recent_ebit = getattr(financial_line_items[0], "ebit", None)
     if enterprise_value > 0 and recent_ebit and recent_ebit > 0:
         ev_ebit = enterprise_value / recent_ebit
-        ev_ebit_points = 0
         if ev_ebit < 15:
-            ev_ebit_points = 2
+            raw_score += 2
             details.append(f"Attractive EV/EBIT: {ev_ebit:.2f}")
         elif ev_ebit < 25:
-            ev_ebit_points = 1
+            raw_score += 1
             details.append(f"Fair EV/EBIT: {ev_ebit:.2f}")
         else:
             details.append(f"High EV/EBIT: {ev_ebit:.2f}")
-        raw_score += ev_ebit_points
     else:
-        details.append("No valid EV/EBIT because EV <= 0 or EBIT <= 0")
+        details.append("No EV/EBIT data")
 
-    # 4) EV/EBITDA
-    recent_ebitda = ebitda_values[0] if ebitda_values else None
+    # 4. EV/EBITDA
+    recent_ebitda = getattr(financial_line_items[0], "ebitda", None)
     if enterprise_value > 0 and recent_ebitda and recent_ebitda > 0:
         ev_ebitda = enterprise_value / recent_ebitda
-        ev_ebitda_points = 0
         if ev_ebitda < 10:
-            ev_ebitda_points = 2
+            raw_score += 2
             details.append(f"Attractive EV/EBITDA: {ev_ebitda:.2f}")
         elif ev_ebitda < 18:
-            ev_ebitda_points = 1
+            raw_score += 1
             details.append(f"Fair EV/EBITDA: {ev_ebitda:.2f}")
         else:
             details.append(f"High EV/EBITDA: {ev_ebitda:.2f}")
-        raw_score += ev_ebitda_points
     else:
-        details.append("No valid EV/EBITDA because EV <= 0 or EBITDA <= 0")
+        details.append("No EV/EBITDA data")
 
     final_score = min(10, (raw_score / 8) * 10)
     return {"score": final_score, "details": "; ".join(details)}

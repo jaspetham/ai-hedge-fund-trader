@@ -5,7 +5,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data import NewsClient, NewsRequest
-from yfinance import Ticker  # Only for sharesOutstanding
+from yfinance import Ticker
 from data.cache import get_cache
 from data.models import (
     Price,
@@ -27,7 +27,7 @@ alpaca_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 news_client = NewsClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
 def get_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
-    adjusted_start_date = (pd.Timestamp(end_date) - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+    adjusted_start_date = (pd.Timestamp(end_date) - pd.Timedelta(days=90)).strftime("%Y-%m-%d")  # Extended to 90 days
     if cached_data := _cache.get_prices(ticker):
         filtered_data = [Price(**price) for price in cached_data if adjusted_start_date <= price["time"] <= end_date]
         if filtered_data:
@@ -63,6 +63,7 @@ def get_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
             time=end_date
         ))
     _cache.set_prices(ticker, [p.model_dump() for p in prices])
+    print(f"Fetched {len(prices)} price records for {ticker}")
     return prices
 
 def get_latest_price(ticker: str) -> float:
@@ -86,40 +87,59 @@ def get_market_cap(ticker: str, end_date: str | None = None) -> float:
     shares = Ticker(ticker).info.get("sharesOutstanding", 0)
     return float(latest_close * shares if shares else 0.0)
 
-def get_financial_metrics(ticker: str, end_date: str, period: str = "annual", limit: int = 5) -> list[FinancialMetrics]:
-    yf_ticker = Ticker(ticker)
-    financials = yf_ticker.financials if period == "annual" else yf_ticker.quarterly_financials
-    if financials.empty:
+def get_financial_metrics(ticker: str, end_date: str, period: str = "annual", limit: int = 10) -> list[FinancialMetrics]:
+    try:
+        yf_ticker = Ticker(ticker)
+        financials = yf_ticker.financials if period == "annual" else yf_ticker.quarterly_financials
+        balance_sheet = yf_ticker.balance_sheet if period == "annual" else yf_ticker.quarterly_balance_sheet
+
+        if financials.empty or balance_sheet.empty:
+            print(f"No financial data for {ticker} - trying alternative sources")
+            # Add fallback data sources here if available
+            return []
+
+        metrics = []
+        currency = yf_ticker.info.get("currency", "USD")
+        shares = yf_ticker.info.get("sharesOutstanding", 0)
+        for date in financials.columns[:limit]:
+            fin_row = financials[date]
+            bal_row = balance_sheet.get(date, pd.Series())
+            metrics.append(FinancialMetrics(
+                ticker=ticker,
+                report_period=date.strftime("%Y-%m-%d"),
+                period=period,
+                currency=currency,
+                net_income=fin_row.get("Net Income", None),
+                revenue=fin_row.get("Total Revenue", None),
+                operating_income=fin_row.get("Operating Income", None),
+                earnings_per_share=fin_row.get("Diluted EPS", None),
+                market_cap=get_market_cap(ticker, end_date),
+                total_assets=bal_row.get("Total Assets", None),
+                current_assets=bal_row.get("Total Current Assets", None),
+                current_liabilities=bal_row.get("Total Current Liabilities", None),
+                total_debt=bal_row.get("Total Debt", None),
+                shareholders_equity=bal_row.get("Total Stockholder Equity", None),
+                outstanding_shares=shares if shares else None,
+            ))
+        print(f"Fetched {len(metrics)} financial metrics for {ticker}")
+        return metrics
+    except Exception as e:
+        print(f"Error fetching financial data for {ticker}: {str(e)}")
         return []
 
-    metrics = []
-    currency = yf_ticker.info.get("currency", "USD")
-    for date in financials.columns[:limit]:
-        row = financials[date]
-        metrics.append(FinancialMetrics(
-            ticker=ticker,
-            report_period=date.strftime("%Y-%m-%d"),
-            period=period,
-            currency=currency,
-            net_income=row.get("Net Income", None),
-            revenue=row.get("Total Revenue", None),
-            operating_income=row.get("Operating Income", None),
-            earnings_per_share=row.get("Diluted EPS", None),
-            market_cap=get_market_cap(ticker, end_date),  # Use end_date
-        ))
-    return metrics
-
-def search_line_items(ticker: str, line_items: list[str], end_date: str, period: str = "annual", limit: int = 5) -> list[LineItem]:
+def search_line_items(ticker: str, line_items: list[str], end_date: str, period: str = "annual", limit: int = 10) -> list[LineItem]:
     yf_ticker = Ticker(ticker)
     financials = yf_ticker.financials if period == "annual" else yf_ticker.quarterly_financials
     balance_sheet = yf_ticker.balance_sheet if period == "annual" else yf_ticker.quarterly_balance_sheet
     cashflow = yf_ticker.cashflow if period == "annual" else yf_ticker.quarterly_cashflow
 
-    if financials.empty:
+    if financials.empty or balance_sheet.empty:
+        print(f"No financial data for {ticker} in search_line_items")
         return []
 
     items = []
     currency = yf_ticker.info.get("currency", "USD")
+    shares = yf_ticker.info.get("sharesOutstanding", 0)
     for date in financials.columns[:limit]:
         fin_row = financials[date]
         bal_row = balance_sheet.get(date, pd.Series())
@@ -142,14 +162,104 @@ def search_line_items(ticker: str, line_items: list[str], end_date: str, period:
             elif li == "cash_and_equivalents": item.cash_and_equivalents = bal_row.get("Cash", None)
             elif li == "total_debt": item.total_debt = bal_row.get("Total Debt", None)
             elif li == "shareholders_equity": item.shareholders_equity = bal_row.get("Total Stockholder Equity", None)
-            elif li == "outstanding_shares": item.outstanding_shares = yf_ticker.info.get("sharesOutstanding", None)
+            elif li == "outstanding_shares": item.outstanding_shares = shares if shares else None
             elif li == "ebit": item.ebit = fin_row.get("EBIT", None)
             elif li == "ebitda": item.ebitda = fin_row.get("EBITDA", None)
+            elif li == "current_assets": item.current_assets = bal_row.get("Total Current Assets", None)
+            elif li == "current_liabilities": item.current_liabilities = bal_row.get("Total Current Liabilities", None)
+            elif li == "total_assets": item.total_assets = bal_row.get("Total Assets", None)
+            elif li == "total_liabilities": item.total_liabilities = bal_row.get("Total Liabilities", None)  # Added
         items.append(item)
+    print(f"Fetched {len(items)} line items for {ticker}")
     return items
 
 def get_insider_trades(ticker: str, end_date: str, start_date: str | None = None, limit: int = 50) -> list:
-    return []  # Still unimplemented
+    try:
+        yf_ticker = Ticker(ticker)
+        insider_data = yf_ticker.insider_transactions
+
+        if insider_data is None:
+            print(f"No insider trade data structure available for {ticker}")
+            return []
+
+        # Handle different yfinance data formats
+        if isinstance(insider_data, pd.Series):
+            insider_data = insider_data.to_frame().T
+        elif not isinstance(insider_data, pd.DataFrame):
+            print(f"Unexpected insider data format for {ticker}")
+            return []
+
+        if insider_data.empty:
+            print(f"No insider trade records for {ticker}")
+            return []
+
+        # Try to find transaction date column
+        date_col = None
+        possible_date_cols = ['Date', 'date', 'Transaction Date', 'trade_date', 'startDate']
+        for col in possible_date_cols + list(insider_data.columns):
+            if str(col).lower() in [c.lower() for c in insider_data.columns]:
+                date_col = col
+                break
+
+        if not date_col:
+            print(f"No identifiable date column in insider data for {ticker}. Available columns: {list(insider_data.columns)}")
+            return []
+
+        # Prepare date range
+        if not start_date:
+            start_date = (pd.Timestamp(end_date) - pd.Timedelta(days=365)).strftime("%Y-%m-%d")
+
+        trades = []
+        for _, row in insider_data.iterrows():
+            try:
+                # Handle various date formats
+                date_value = row[date_col]
+                if pd.isna(date_value):
+                    continue
+
+                trade_date = pd.to_datetime(date_value).strftime("%Y-%m-%d")
+                if not trade_date:
+                    continue
+
+                if start_date <= trade_date <= end_date and len(trades) < limit:
+                    trades.append({
+                        "ticker": ticker,
+                        "date": trade_date,
+                        "insider_name": str(row.get('Insider Name', row.get('insider_name', 'Unknown'))),
+                        "transaction_type": str(row.get('Transaction', row.get('transaction_type', 'Unknown'))),
+                        "shares": int(row.get('Shares', row.get('shares', 0))),
+                        "value": float(row.get('Value', row.get('value', 0.0)))
+                    })
+            except Exception as e:
+                print(f"Skipping malformed insider trade row for {ticker}: {e}")
+                continue
+
+        return trades
+
+    except Exception as e:
+        print(f"Error processing insider trades for {ticker}: {str(e)}")
+        return []
+
+def get_dividend_history(ticker: str, end_date: str, start_date: str | None = None, limit: int = 10) -> list:
+    yf_ticker = Ticker(ticker)
+    dividends = yf_ticker.dividends
+    if dividends.empty:
+        print(f"No dividend data for {ticker}")
+        return []
+
+    if not start_date:
+        start_date = (pd.Timestamp(end_date) - pd.Timedelta(days=365 * 5)).strftime("%Y-%m-%d")
+
+    div_history = []
+    for date, amount in dividends.items():
+        div_date = date.strftime("%Y-%m-%d")
+        if start_date <= div_date <= end_date and len(div_history) < limit:
+            div_history.append({
+                "ticker": ticker,
+                "date": div_date,
+                "amount": float(amount)
+            })
+    return div_history
 
 def get_company_news(ticker: str, end_date: str, start_date: str | None = None, limit: int = 50) -> list[NewsItem]:
     if not start_date:

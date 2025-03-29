@@ -14,6 +14,7 @@ import json
 from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
+import numpy as np
 
 
 class BillAckmanSignal(BaseModel):
@@ -78,13 +79,13 @@ def bill_ackman_agent(state: AgentState):
         prices = get_prices(ticker, start_date=start_date, end_date=end_date)
 
         progress.update_status("bill_ackman_agent", ticker, "Analyzing business quality")
-        quality_analysis = analyze_business_quality(metrics, financial_line_items)
+        quality_analysis = analyze_business_quality(metrics, financial_line_items, prices)
 
         progress.update_status("bill_ackman_agent", ticker, "Analyzing financial discipline")
         balance_sheet_analysis = analyze_financial_discipline(financial_line_items)
 
         progress.update_status("bill_ackman_agent", ticker, "Analyzing valuation")
-        valuation_analysis = analyze_valuation(financial_line_items, market_cap)
+        valuation_analysis = analyze_valuation(financial_line_items, market_cap, prices)
 
         progress.update_status("bill_ackman_agent", ticker, "Analyzing insider activity")
         insider_analysis = analyze_insider_activity(insider_trades)
@@ -148,13 +149,14 @@ def bill_ackman_agent(state: AgentState):
     return {"messages": [message], "data": state["data"]}
 
 
-def analyze_business_quality(metrics: list, financial_line_items: list) -> dict:
+def analyze_business_quality(metrics: list, financial_line_items: list, prices: list) -> dict:
     """
     Analyze business quality:
     - Revenue growth
     - Operating margin consistency
     - Free cash flow consistency
     - Return on Equity (ROE)
+    - Price Volatility (Ackman prefers stability)
     """
     score = 0
     details = []
@@ -163,7 +165,7 @@ def analyze_business_quality(metrics: list, financial_line_items: list) -> dict:
         return {"score": 0, "details": "Insufficient data to analyze business quality"}
 
     # 1. Revenue Growth
-    revenues = [getattr(item, "revenue", None) for item in financial_line_items if hasattr(item, "revenue")]
+    revenues = [getattr(item, "revenue", None) for item in financial_line_items]
     valid_revenues = [r for r in revenues if r is not None]
     if len(valid_revenues) >= 2:
         initial, final = valid_revenues[-1], valid_revenues[0]  # Oldest to newest
@@ -183,7 +185,7 @@ def analyze_business_quality(metrics: list, financial_line_items: list) -> dict:
         details.append("Insufficient revenue data.")
 
     # 2. Operating Margin Consistency
-    op_margins = [getattr(item, "operating_margin", None) for item in financial_line_items if hasattr(item, "operating_margin")]
+    op_margins = [getattr(item, "operating_margin", None) for item in financial_line_items]
     valid_margins = [m for m in op_margins if m is not None]
     if valid_margins:
         above_15 = sum(1 for m in valid_margins if m > 0.15)
@@ -196,7 +198,7 @@ def analyze_business_quality(metrics: list, financial_line_items: list) -> dict:
         details.append("No operating margin data.")
 
     # 3. Free Cash Flow Consistency
-    fcf_vals = [getattr(item, "free_cash_flow", None) for item in financial_line_items if hasattr(item, "free_cash_flow")]
+    fcf_vals = [getattr(item, "free_cash_flow", None) for item in financial_line_items]
     valid_fcf = [f for f in fcf_vals if f is not None]
     if valid_fcf:
         positive_fcf = sum(1 for f in valid_fcf if f > 0)
@@ -209,8 +211,8 @@ def analyze_business_quality(metrics: list, financial_line_items: list) -> dict:
         details.append("No FCF data.")
 
     # 4. ROE from Latest Metrics
-    if metrics and hasattr(metrics[0], "return_on_equity") and metrics[0].return_on_equity is not None:
-        roe = metrics[0].return_on_equity
+    if metrics and getattr(metrics[0], "return_on_equity", None) is not None:
+        roe = getattr(metrics[0], "return_on_equity", 0)
         if roe > 0.15:
             score += 3
             details.append(f"High ROE: {roe:.1%}")
@@ -222,7 +224,24 @@ def analyze_business_quality(metrics: list, financial_line_items: list) -> dict:
     else:
         details.append("ROE data unavailable.")
 
-    final_score = min(10, score * (10 / 12))  # Scale to 0-10
+    # 5. Price Volatility (Ackman prefers stability)
+    if prices and len(prices) >= 90:
+        close_prices = [getattr(p, "close", 0) for p in prices]
+        if len(close_prices) >= 90:
+            returns = np.diff(close_prices) / close_prices[:-1]
+            volatility = np.std(returns) * np.sqrt(252)
+            if volatility < 0.20:
+                score += 2
+                details.append(f"Low price volatility: {volatility:.2%}")
+            elif volatility < 0.30:
+                score += 1
+                details.append(f"Moderate price volatility: {volatility:.2%}")
+            else:
+                details.append(f"High price volatility: {volatility:.2%}")
+    else:
+        details.append("Insufficient price data for volatility analysis")
+
+    final_score = min(10, score * (10 / 14))  # Scale to 0-10, max raw score 14
     return {"score": final_score, "details": "; ".join(details)}
 
 
@@ -239,7 +258,7 @@ def analyze_financial_discipline(financial_line_items: list) -> dict:
         return {"score": 0, "details": "Insufficient data to analyze financial discipline"}
 
     # 1. Debt-to-Equity Trend
-    dte_vals = [getattr(item, "debt_to_equity", None) for item in financial_line_items if hasattr(item, "debt_to_equity")]
+    dte_vals = [getattr(item, "debt_to_equity", None) for item in financial_line_items]
     valid_dte = [d for d in dte_vals if d is not None]
     if valid_dte:
         below_one = sum(1 for d in valid_dte if d < 1.0)
@@ -267,7 +286,7 @@ def analyze_financial_discipline(financial_line_items: list) -> dict:
             details.append("No leverage data available.")
 
     # 2. Capital Returns (Dividends or Buybacks)
-    dividends = [getattr(item, "dividends_and_other_cash_distributions", None) for item in financial_line_items if hasattr(item, "dividends_and_other_cash_distributions")]
+    dividends = [getattr(item, "dividends_and_other_cash_distributions", None) for item in financial_line_items]
     valid_dividends = [d for d in dividends if d is not None]
     if valid_dividends:
         paying_dividends = sum(1 for d in valid_dividends if d < 0)
@@ -277,7 +296,7 @@ def analyze_financial_discipline(financial_line_items: list) -> dict:
         else:
             details.append(f"Dividends not consistent.")
 
-    shares = [getattr(item, "outstanding_shares", None) for item in financial_line_items if hasattr(item, "outstanding_shares")]
+    shares = [getattr(item, "outstanding_shares", None) for item in financial_line_items]
     valid_shares = [s for s in shares if s is not None]
     if len(valid_shares) >= 2 and valid_shares[0] > valid_shares[-1]:
         score += 3
@@ -285,18 +304,18 @@ def analyze_financial_discipline(financial_line_items: list) -> dict:
     else:
         details.append("No significant share reduction.")
 
-    final_score = min(10, score * (10 / 10))  # Scale to 0-10
+    final_score = min(10, score * (10 / 10))  # Scale to 0-10, max raw score 10
     return {"score": final_score, "details": "; ".join(details)}
 
 
-def analyze_valuation(financial_line_items: list, market_cap: float) -> dict:
+def analyze_valuation(financial_line_items: list, market_cap: float, prices: list) -> dict:
     """
-Ackman invests in companies trading at a discount to intrinsic value.
+    Ackman invests in companies trading at a discount to intrinsic value.
     We can do a simplified DCF or an FCF-based approach.
     This function currently uses the latest free cash flow only,
     but you could expand it to use an average or multi-year FCF approach.
     """
-    if not financial_line_items or market_cap is None:
+    if not financial_line_items or market_cap is None or not prices:
         return {"score": 0, "details": "Insufficient data for valuation"}
 
     latest = financial_line_items[0]  # Most recent
@@ -321,16 +340,31 @@ Ackman invests in companies trading at a discount to intrinsic value.
     margin_of_safety = (intrinsic_value - market_cap) / market_cap if market_cap > 0 else -1
 
     score = 0
+    details = [f"Intrinsic value: ${intrinsic_value:,.2f}", f"Market cap: ${market_cap:,.2f}", f"Margin of safety: {margin_of_safety:.2%}"]
     if margin_of_safety > 0.3:
-        score = 8
-        details = [f"Intrinsic value: ${intrinsic_value:,.2f}", f"Market cap: ${market_cap:,.2f}", f"Margin of safety: {margin_of_safety:.2%}"]
+        score += 8
     elif margin_of_safety > 0.1:
-        score = 4
-        details = [f"Intrinsic value: ${intrinsic_value:,.2f}", f"Market cap: ${market_cap:,.2f}", f"Margin of safety: {margin_of_safety:.2%}"]
-    else:
-        details = [f"Intrinsic value: ${intrinsic_value:,.2f}", f"Market cap: ${market_cap:,.2f}", f"Low or negative margin of safety: {margin_of_safety:.2%}"]
+        score += 4
 
-    return {"score": score, "details": "; ".join(details)}
+    # Volatility (Ackman prefers stability)
+    if prices and len(prices) >= 90:
+        close_prices = [getattr(p, "close", 0) for p in prices]
+        if len(close_prices) >= 90:
+            returns = np.diff(close_prices) / close_prices[:-1]
+            volatility = np.std(returns) * np.sqrt(252)
+            if volatility < 0.20:
+                score += 2
+                details.append(f"Low volatility: {volatility:.2%}")
+            elif volatility < 0.30:
+                score += 1
+                details.append(f"Moderate volatility: {volatility:.2%}")
+            else:
+                details.append(f"High volatility: {volatility:.2%}")
+    else:
+        details.append("Insufficient price data.")
+
+    final_score = min(10, score * (10 / 10))  # Scale to 0-10, max raw score 10
+    return {"score": final_score, "details": "; ".join(details)}
 
 
 def analyze_insider_activity(insider_trades: list) -> dict:
@@ -346,10 +380,11 @@ def analyze_insider_activity(insider_trades: list) -> dict:
 
     buys, sells = 0, 0
     for trade in insider_trades:
-        if trade.transaction_shares is not None:
-            if trade.transaction_shares > 0:
+        shares = getattr(trade, "transaction_shares", None)
+        if shares is not None:
+            if shares > 0:
                 buys += 1
-            elif trade.transaction_shares < 0:
+            elif shares < 0:
                 sells += 1
 
     total = buys + sells
@@ -382,7 +417,7 @@ def analyze_sentiment(news_items: list) -> dict:
         return {"score": score, "details": "; ".join(details)}
 
     negative_keywords = ["lawsuit", "fraud", "investigation", "decline", "restructuring"]
-    negative_count = sum(1 for news in news_items if any(word in (news.title or "").lower() for word in negative_keywords))
+    negative_count = sum(1 for news in news_items if any(word in (getattr(news, "title", "") or "").lower() for word in negative_keywords))
 
     if negative_count > len(news_items) * 0.3:
         score = 3

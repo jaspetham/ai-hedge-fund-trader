@@ -1,13 +1,9 @@
 import math
-
 from langchain_core.messages import HumanMessage
-
 from graph.state import AgentState, show_agent_reasoning
-
 import json
 import pandas as pd
 import numpy as np
-
 from tools.api import get_prices, prices_to_df
 from utils.progress import progress
 
@@ -26,25 +22,18 @@ def technical_analyst_agent(state: AgentState):
     start_date = data["start_date"]
     end_date = data["end_date"]
     tickers = data["tickers"]
+    portfolio = data["portfolio"]
 
-    # Initialize analysis for each ticker
     technical_analysis = {}
 
     for ticker in tickers:
         progress.update_status("technical_analyst_agent", ticker, "Analyzing price data")
-
-        # Get the historical price data
-        prices = get_prices(
-            ticker=ticker,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        prices = get_prices(ticker=ticker, start_date=start_date, end_date=end_date)
 
         if not prices:
             progress.update_status("technical_analyst_agent", ticker, "Failed: No price data found")
             continue
 
-        # Convert prices to a DataFrame
         prices_df = prices_to_df(prices)
 
         progress.update_status("technical_analyst_agent", ticker, "Calculating trend signals")
@@ -62,7 +51,6 @@ def technical_analyst_agent(state: AgentState):
         progress.update_status("technical_analyst_agent", ticker, "Statistical analysis")
         stat_arb_signals = calculate_stat_arb_signals(prices_df)
 
-        # Combine all signals using a weighted ensemble approach
         strategy_weights = {
             "trend": 0.25,
             "mean_reversion": 0.20,
@@ -83,7 +71,6 @@ def technical_analyst_agent(state: AgentState):
             strategy_weights,
         )
 
-        # Generate detailed analysis report for this ticker
         technical_analysis[ticker] = {
             "signal": combined_signal["signal"],
             "confidence": round(combined_signal["confidence"] * 100),
@@ -117,16 +104,11 @@ def technical_analyst_agent(state: AgentState):
         }
         progress.update_status("technical_analyst_agent", ticker, "Done")
 
-    # Create the technical analyst message
-    message = HumanMessage(
-        content=json.dumps(technical_analysis),
-        name="technical_analyst_agent",
-    )
+    message = HumanMessage(content=json.dumps(technical_analysis), name="technical_analyst_agent")
 
     if state["metadata"]["show_reasoning"]:
         show_agent_reasoning(technical_analysis, "Technical Analyst")
 
-    # Add the signal to the analyst_signals list
     state["data"]["analyst_signals"]["technical_analyst_agent"] = technical_analysis
 
     return {

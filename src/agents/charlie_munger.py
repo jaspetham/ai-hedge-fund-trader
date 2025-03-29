@@ -14,6 +14,7 @@ import json
 from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
+import numpy as np
 
 
 class CharlieMungerSignal(BaseModel):
@@ -96,7 +97,7 @@ def charlie_munger_agent(state: AgentState):
         management_analysis = analyze_management_quality(financial_line_items, insider_trades)
 
         progress.update_status("charlie_munger_agent", ticker, "Analyzing business predictability")
-        predictability_analysis = analyze_predictability(financial_line_items)
+        predictability_analysis = analyze_predictability(financial_line_items, prices)
 
         progress.update_status("charlie_munger_agent", ticker, "Calculating Munger-style valuation")
         valuation_analysis = calculate_munger_valuation(financial_line_items, market_cap, prices)
@@ -190,8 +191,7 @@ def analyze_moat_strength(metrics: list, financial_line_items: list) -> dict:
         }
 
     # 1. Return on Invested Capital (ROIC) analysis - Munger's favorite metric
-    roic_values = [getattr(item, "return_on_invested_capital", None) for item in financial_line_items
-                   if hasattr(item, 'return_on_invested_capital')]
+    roic_values = [getattr(item, "return_on_invested_capital", None) for item in financial_line_items]
     valid_roic = [r for r in roic_values if r is not None]
 
     if valid_roic:
@@ -212,8 +212,7 @@ def analyze_moat_strength(metrics: list, financial_line_items: list) -> dict:
         details.append("No ROIC data available")
 
     # 2. Pricing power - check gross margin stability and trends
-    gross_margins = [getattr(item, "gross_margin", None) for item in financial_line_items
-                    if hasattr(item, 'gross_margin')]
+    gross_margins = [getattr(item, "gross_margin", None) for item in financial_line_items]
     valid_margins = [m for m in gross_margins if m is not None]
 
     if valid_margins and len(valid_margins) >= 3:
@@ -256,10 +255,8 @@ def analyze_moat_strength(metrics: list, financial_line_items: list) -> dict:
         details.append("Insufficient data for capital intensity analysis")
 
     # 4. Intangible assets - Munger values R&D and intellectual property
-    r_and_d = [getattr(item, "research_and_development", None) for item in financial_line_items
-              if hasattr(item, 'research_and_development')]
-    goodwill_and_intangible_assets = [getattr(item, "goodwill_and_intangible_assets", None) for item in financial_line_items
-               if hasattr(item, 'goodwill_and_intangible_assets')]
+    r_and_d = [getattr(item, "research_and_development", None) for item in financial_line_items]
+    goodwill_and_intangible_assets = [getattr(item, "goodwill_and_intangible_assets", None) for item in financial_line_items]
 
     valid_r_and_d = [r for r in r_and_d if r is not None]
     valid_goodwill = [g for g in goodwill_and_intangible_assets if g is not None]
@@ -301,10 +298,8 @@ def analyze_management_quality(financial_line_items: list, insider_trades: list)
 
     # 1. Capital allocation - Check FCF to net income ratio
     # Munger values companies that convert earnings to cash
-    fcf_values = [getattr(item, "free_cash_flow", None) for item in financial_line_items
-                 if hasattr(item, 'free_cash_flow')]
-    net_income_values = [getattr(item, "net_income", None) for item in financial_line_items
-                        if hasattr(item, 'net_income')]
+    fcf_values = [getattr(item, "free_cash_flow", None) for item in financial_line_items]
+    net_income_values = [getattr(item, "net_income", None) for item in financial_line_items]
 
     valid_fcf = [f for f in fcf_values if f is not None]
     valid_net_income = [n for n in net_income_values if n is not None]
@@ -332,10 +327,8 @@ def analyze_management_quality(financial_line_items: list, insider_trades: list)
         details.append("Missing FCF or Net Income data")
 
     # 2. Debt management - Munger is cautious about debt
-    debt_values = [getattr(item, "total_debt", None) for item in financial_line_items
-                  if hasattr(item, 'total_debt')]
-    equity_values = [getattr(item, "shareholders_equity", None) for item in financial_line_items
-                    if hasattr(item, 'shareholders_equity')]
+    debt_values = [getattr(item, "total_debt", None) for item in financial_line_items]
+    equity_values = [getattr(item, "shareholders_equity", None) for item in financial_line_items]
 
     valid_debt = [d for d in debt_values if d is not None]
     valid_equity = [e for e in equity_values if e is not None]
@@ -359,10 +352,8 @@ def analyze_management_quality(financial_line_items: list, insider_trades: list)
         details.append("Missing debt or equity data")
 
     # 3. Cash management efficiency - Munger values appropriate cash levels
-    cash_values = [getattr(item, "cash_and_equivalents", None) for item in financial_line_items
-                  if hasattr(item, 'cash_and_equivalents')]
-    revenue_values = [getattr(item, "revenue", None) for item in financial_line_items
-                     if hasattr(item, 'revenue')]
+    cash_values = [getattr(item, "cash_and_equivalents", None) for item in financial_line_items]
+    revenue_values = [getattr(item, "revenue", None) for item in financial_line_items]
 
     valid_cash = [c for c in cash_values if c is not None]
     valid_revenue = [r for r in revenue_values if r is not None]
@@ -391,8 +382,8 @@ def analyze_management_quality(financial_line_items: list, insider_trades: list)
     # 4. Insider activity - Munger values skin in the game
     if insider_trades and len(insider_trades) > 0:
         # Count buys vs. sells
-        buys = sum(1 for trade in insider_trades if hasattr(trade, 'transaction_shares') and trade.transaction_shares > 0)
-        sells = sum(1 for trade in insider_trades if hasattr(trade, 'transaction_shares') and trade.transaction_shares < 0)
+        buys = sum(1 for trade in insider_trades if getattr(trade, 'transaction_shares', 0) > 0)
+        sells = sum(1 for trade in insider_trades if getattr(trade, 'transaction_shares', 0) < 0)
 
         # Calculate the buy ratio
         total_trades = buys + sells
@@ -415,8 +406,7 @@ def analyze_management_quality(financial_line_items: list, insider_trades: list)
         details.append("No insider trading data available")
 
     # 5. Consistency in share count - Munger prefers stable/decreasing shares
-    share_counts = [getattr(item, "outstanding_shares", None) for item in financial_line_items
-                   if hasattr(item, 'outstanding_shares')]
+    share_counts = [getattr(item, "outstanding_shares", None) for item in financial_line_items]
     valid_shares = [s for s in share_counts if s is not None]
 
     if valid_shares and len(valid_shares) >= 3:
@@ -444,7 +434,7 @@ def analyze_management_quality(financial_line_items: list, insider_trades: list)
     }
 
 
-def analyze_predictability(financial_line_items: list) -> dict:
+def analyze_predictability(financial_line_items: list, prices: list) -> dict:
     """
     Assess the predictability of the business - Munger strongly prefers businesses
     whose future operations and cashflows are relatively easy to predict.
@@ -459,8 +449,7 @@ def analyze_predictability(financial_line_items: list) -> dict:
         }
 
     # 1. Revenue stability and growth
-    revenues = [getattr(item, "revenue", None) for item in financial_line_items
-               if hasattr(item, 'revenue')]
+    revenues = [getattr(item, "revenue", None) for item in financial_line_items]
     valid_revenues = [r for r in revenues if r is not None]
 
     if valid_revenues and len(valid_revenues) >= 5:
@@ -489,8 +478,7 @@ def analyze_predictability(financial_line_items: list) -> dict:
         details.append("Insufficient revenue history for predictability analysis")
 
     # 2. Operating income stability
-    op_income = [getattr(item, "operating_income", None) for item in financial_line_items
-                if hasattr(item, 'operating_income')]
+    op_income = [getattr(item, "operating_income", None) for item in financial_line_items]
     valid_op_income = [o for o in op_income if o is not None]
 
     if valid_op_income and len(valid_op_income) >= 5:
@@ -515,8 +503,7 @@ def analyze_predictability(financial_line_items: list) -> dict:
         details.append("Insufficient operating income history")
 
     # 3. Margin consistency - Munger values stable margins
-    op_margins = [getattr(item, "operating_margin", None) for item in financial_line_items
-                 if hasattr(item, 'operating_margin')]
+    op_margins = [getattr(item, "operating_margin", None) for item in financial_line_items]
     valid_margins = [m for m in op_margins if m is not None]
 
     if valid_margins and len(valid_margins) >= 5:
@@ -536,8 +523,7 @@ def analyze_predictability(financial_line_items: list) -> dict:
         details.append("Insufficient margin history")
 
     # 4. Cash generation reliability
-    fcf_values = [getattr(item, "free_cash_flow", None) for item in financial_line_items
-                 if hasattr(item, 'free_cash_flow')]
+    fcf_values = [getattr(item, "free_cash_flow", None) for item in financial_line_items]
     valid_fcf = [f for f in fcf_values if f is not None]
 
     if valid_fcf and len(valid_fcf) >= 5:
@@ -557,9 +543,25 @@ def analyze_predictability(financial_line_items: list) -> dict:
     else:
         details.append("Insufficient free cash flow history")
 
+    # 5. Price Volatility (Munger prefers predictable businesses)
+    if prices and len(prices) >= 90:
+        close_prices = [getattr(p, "close", 0) for p in prices]
+        if len(close_prices) >= 90:
+            returns = np.diff(close_prices) / close_prices[:-1]
+            volatility = np.std(returns) * np.sqrt(252)
+            if volatility < 0.20:
+                score += 2
+                details.append(f"Low price volatility: {volatility:.2%}")
+            elif volatility < 0.30:
+                score += 1
+                details.append(f"Moderate price volatility: {volatility:.2%}")
+            else:
+                details.append(f"High price volatility: {volatility:.2%}")
+    else:
+        details.append("Insufficient price data for volatility analysis")
+
     # Scale score to 0-10 range
-    # Maximum possible raw score would be 10 (3+3+2+2)
-    final_score = min(10, score * 10 / 10)
+    final_score = min(10, score * 10 / 12)  # Max possible raw score is 12
 
     return {
         "score": final_score,
@@ -584,8 +586,7 @@ def calculate_munger_valuation(financial_line_items: list, market_cap: float, pr
         }
 
     # Get FCF values (Munger's preferred "owner earnings" metric)
-    fcf_values = [getattr(item, "free_cash_flow", None) for item in financial_line_items
-                 if hasattr(item, 'free_cash_flow')]
+    fcf_values = [getattr(item, "free_cash_flow", None) for item in financial_line_items]
     valid_fcf = [f for f in fcf_values if f is not None]
 
     if not valid_fcf or len(valid_fcf) < 3:
@@ -660,23 +661,24 @@ def calculate_munger_valuation(financial_line_items: list, market_cap: float, pr
             details.append("Declining FCF trend is concerning")
 
     # 7. Price Volatility (Munger prefers stability)
-    if len(prices) > 10:
-        close_prices = [p.close for p in prices if p.close is not None]
-        if len(close_prices) > 10:
-            daily_returns = [(close_prices[i] - close_prices[i-1]) / close_prices[i-1] for i in range(1, len(close_prices)) if close_prices[i-1] > 0]
-            if daily_returns:
-                import statistics
-                volatility = statistics.pstdev(daily_returns)
-                if volatility < 0.02:
-                    score += 1
-                    details.append(f"Low price volatility: {volatility:.2%}")
-                elif volatility > 0.04:
-                    details.append(f"High price volatility: {volatility:.2%}")
-                else:
-                    details.append(f"Moderate price volatility: {volatility:.2%}")
+    if prices and len(prices) >= 90:
+        close_prices = [getattr(p, "close", 0) for p in prices]
+        if len(close_prices) >= 90:
+            returns = np.diff(close_prices) / close_prices[:-1]
+            volatility = np.std(returns) * np.sqrt(252)
+            if volatility < 0.20:
+                score += 2
+                details.append(f"Low price volatility: {volatility:.2%}")
+            elif volatility < 0.30:
+                score += 1
+                details.append(f"Moderate price volatility: {volatility:.2%}")
+            else:
+                details.append(f"High price volatility: {volatility:.2%}")
+    else:
+        details.append("Insufficient price data for volatility analysis")
 
     # Scale score to 0-10 range
-    final_score = min(10, score)
+    final_score = min(10, score * 10 / 13)  # Max raw score is 13 (4+3+3+3)
 
     return {
         "score": final_score,
@@ -704,7 +706,7 @@ def analyze_sentiment(news_items: list) -> dict:
         return {"score": score, "details": "; ".join(details)}
 
     negative_keywords = ["lawsuit", "fraud", "bankruptcy", "investigation", "decline"]
-    negative_count = sum(1 for news in news_items if any(word in (news.title or "").lower() for word in negative_keywords))
+    negative_count = sum(1 for news in news_items if any(word in (getattr(news, "title", "") or "").lower() for word in negative_keywords))
 
     if negative_count > len(news_items) * 0.3:
         score = 3
